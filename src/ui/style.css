@@ -1,0 +1,237 @@
+/**
+ * 样式（重制版 v4）
+ * ===============================================================
+ * 原则（LESS IS MORE）：**只有一块屏** —— 页头 / HUD / 三条线 / 待决 / 世界榜 / 流水。
+ * 配色基调由 `--accent` 一个变量驱动，`render.js` 按阶段写它。
+ * 所有尺寸用相对单位，手机上不出现横向溢出。
+ */
+
+:root {
+  --bg: #0d0f12;
+  --panel: #151a20;
+  --fg: #dfe6ee;
+  --mut: #7c8794;
+  --line: #232b34;
+  --accent: #6ad1c0;
+  --ok: #7bc47f;
+  --bad: #e06c75;
+  --gold: #c9b458;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#app {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 12px 12px 84px;
+}
+
+/* ── 页头 ── */
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 2px 10px;
+}
+.head .brand { font-size: 16px; font-weight: 600; color: var(--accent); }
+.head .date { font-size: 12px; color: var(--mut); }
+.head .tools { margin-left: auto; }
+
+.ic {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ic:active { background: var(--line); }
+
+/* ── HUD ── */
+.hud {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.hud .cell {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.hud .cell i { display: block; font-style: normal; font-size: 11px; color: var(--mut); }
+.hud .cell b { display: block; font-size: 15px; font-weight: 600; word-break: break-all; }
+.hud .cell u { display: block; text-decoration: none; font-size: 11px; color: var(--mut); }
+
+/* ── 阶段目标 ── */
+.goal {
+  font-size: 12px;
+  color: var(--mut);
+  padding: 0 2px 8px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.goal b.ok { color: var(--ok); }
+.goal .mut { margin-left: auto; }
+
+/* ── 三条投资线 ── */
+.lines { display: grid; gap: 6px; margin-bottom: 10px; }
+.line {
+  display: grid;
+  grid-template-columns: auto 52px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.line .btn {
+  background: var(--accent);
+  border: 0;
+  border-radius: 6px;
+  color: #07201c;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.line .btn em { font-style: normal; font-weight: 400; opacity: .6; font-size: 11px; margin-left: 5px; }
+.line .btn.dim { background: var(--line); color: var(--mut); }
+.line .lv { font-size: 12px; color: var(--mut); }
+.line .val { font-size: 13px; }
+.line .cost { font-size: 12px; color: var(--mut); }
+
+/* ── 待决事件（在线不弹窗，就长在主界面里）── */
+.pending {
+  background: var(--panel);
+  border: 1px solid var(--gold);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.pending .p-head { font-size: 11px; color: var(--gold); }
+.pending .p-head b { font-size: 14px; }
+.pending .p-title { font-weight: 600; margin: 4px 0 2px; }
+.pending .p-body { font-size: 13px; color: var(--mut); }
+.pending .p-opts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.opt {
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.opt:active { background: rgba(255, 255, 255, .06); }
+.opt.danger { border-color: var(--bad); color: var(--bad); }
+
+/* ── 世界市值榜 ── */
+.rank {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px 6px;
+  margin-bottom: 10px;
+}
+.rank-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--mut);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.rank .row {
+  display: grid;
+  grid-template-columns: 26px 1fr 44px auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 13px;
+}
+.rank .row .no { color: var(--mut); font-size: 12px; }
+.rank .row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank .row .dlt { font-size: 11px; text-align: right; color: var(--mut); }
+.rank .row .dlt .up { color: var(--ok); font-style: normal; }
+.rank .row .dlt .down { color: var(--bad); font-style: normal; }
+.rank .row .dlt .new { color: var(--gold); font-style: normal; }
+.rank .row .cap { text-align: right; font-variant-numeric: tabular-nums; }
+.rank .row.me { color: var(--accent); font-weight: 600; }
+.rank .sep { text-align: center; color: var(--mut); font-size: 11px; padding: 2px 0; }
+
+/* ── 流水 ── */
+.log {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--mut);
+}
+.log .li { padding: 2px 0; border-bottom: 1px solid rgba(255, 255, 255, .03); }
+.log .li:last-child { border-bottom: 0; }
+
+/* ── 底栏 ── */
+.foot {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  background: rgba(13, 15, 18, .94);
+  border-top: 1px solid var(--line);
+  max-width: 620px;
+  margin: 0 auto;
+}
+.foot .grow { flex: 1; }
+
+/* ── 弹窗层 ── */
+#overlay:empty { display: none; }
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 10;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  width: 100%;
+  max-width: 420px;
+  max-height: 82vh;
+  overflow: auto;
+}
+.modal .m-head { font-size: 15px; font-weight: 600; margin-bottom: 8px; color: var(--accent); }
+.modal .m-body { font-size: 13px; color: var(--fg); }
+.modal .m-body p { margin: 6px 0; }
+.modal .m-opts { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.modal .kv { display: flex; justify-content: space-between; padding: 3px 0; }
+.modal .kv i { font-style: normal; color: var(--mut); }
+.line-quote { color: var(--accent); }
+.mut { color: var(--mut); }

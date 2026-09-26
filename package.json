@@ -6,8 +6,17 @@
   "description": "《Abstract Studio 创业模拟器》—— 网页文字放置游戏。设计文档见 GDD.MD",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "vite build && node tools/postbuild.mjs && node tools/verify-dist.mjs",
+    "preview": "vite preview",
+    "sim": "node tools/balance-sim.mjs",
+    "check": "node tools/headless-check.mjs",
+    "tune": "node tools/recalibrate-curve.mjs",
+    "play": "node tools/playthrough.mjs",
+    "play:all": "node tools/playthrough.mjs --all",
+    "click": "node tools/click-sim.mjs",
+    "probe": "node tools/probes.mjs",
+    "dead": "node tools/dead-code.mjs",
+    "content": "node tools/content-dump.mjs"
   },
   "devDependencies": {
     "playwright": "^1.63.0",
