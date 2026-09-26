@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+docs/
+
+# 工具 / IDE 运行时目录（会自动重建，不进版本库）
+.trae/
+.trae-chat-history/
+.codebuddy/
+.superpowers/
+.refs/
+
+# 归档里的第三方源码克隆（102MB；可按归档 GDD 记录的 clone 命令重新获取）
+docs/archive/2026-09-26-pre-reset/refs/

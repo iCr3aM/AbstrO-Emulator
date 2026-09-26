@@ -1,0 +1,16 @@
+{
+  "name": "abstract-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "《Abstract Studio 创业模拟器》—— 网页文字放置游戏。设计文档见 GDD.MD",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0",
+    "vite": "^5.4.0"
+  }
+}
