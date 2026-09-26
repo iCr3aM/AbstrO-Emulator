@@ -1,298 +1,390 @@
+#!/usr/bin/env node
 /**
- * 真实点击模拟（click simulation）
+ * 点击链路回放（`npm run click`，GDD §5.3）
  * ===============================================================
- * 它回答的问题和另外两个工具都不同：
+ * 为什么非有它不可：check / robust / probe 全都**直接调 core 函数**，所以永远不会发现
+ * 「界面上没有这个按钮」「点了没反应」「弹窗活不过一帧」这类 bug。
+ * 只有「把 `render()` 吐出来的 HTML 解析成按钮 → 构造事件 → 走 `bind.js` 的委托
+ * → 落到 `dispatch`」这一整条路，才能覆盖 UI 的死活。
  *
- *   headless-check  → 数值/平衡对不对
- *   playthrough     → 玩家能不能走到某个结局
- *   click-sim       → **界面上出现的按钮，点了到底有没有用**
- *
- * 为什么必须有它：2026-09-23 发现游戏在真实浏览器里**根本点不动** ——
- * 主循环每帧 `root.innerHTML = ...` 把 DOM 整个重建（60fps），
- * 而 `click` 事件要求 mousedown 与 mouseup 落在同一个节点上，桌面端于是永远点不中。
- * 同时所有弹窗都挂在 `#app` 里，**活不过一帧** → 路线抉择选不了、事件弹窗点不掉 → 无法通关。
- * 这类 bug **只能**靠「从渲染结果里解析按钮、再走真实点击路径」来暴露：
- * 前面两个工具都是直接调 core 函数，永远看不见 UI 的死活。
- *
- * 忠实性要求：
- *   1. 每一步都**重新渲染**，按钮只能从**渲染出来的 HTML 里**找（不直接调 core）。
- *   2. 走的是**事件委托**那条路径（从 dataset 解析意图再调 handler）。
- *      ⚠️ 这份 dispatch 是**手抄** `main.js` 的副本（浏览器的接线已抽到 `src/ui/bind.js`），
- *         不是同一段代码 —— 于是**漏抄新接线不会报错，只会静默失效**。
- *         每次 main.js 新增一条触发路径，都必须同步抄到这里（本轮就是漏抄了「幕自动推进 → 弹抉择」）。
- *   3. 断言里包含**结构约束**：弹窗必须不在 `#app` 里（否则会被下一帧擦掉）。
+ * ⚠️ `dispatch` 在这里是**抄的一份**（main.js 没有导出它）。抄件与主件一旦走偏，
+ *    探针就会报红灯（`probes.mjs` 有一条接线一致性探针比对两份 `if (d.x !== undefined)`）。
+ *    这就是 GDD §5.3 那句「新的接线必须同步抄进 click-sim / probes」的执行方式。
+ * ⚠️ 主事件是 `pointerdown`（不是 `click`）—— 本文件按 `bind.js` 的 `PRIMARY_EVENT` 派发，
+ *    所以「有人把 bind.js 改回 click」这件事会在跑分的**同时**被抓住。
+ * ⚠️ 恒 exit 0；结论读末尾 `BRIEF`。
  */
 
+import { installDom, makeNode, buttonsIn, findBtn } from './dom-stub.mjs';
 import { createState } from '../src/core/state.js';
-import { rates, derived, costOf, canAfford, purchase, unlocked } from '../src/core/economy.js';
-import { ACTS, BUILDINGS, STAFF } from '../src/core/content.js';
-import { tick } from '../src/core/engine.js';
-import { render, renderChoice, renderEvent } from '../src/ui/render.js';
-import { pendingEvent, resolveEvent, autoEventChoice } from '../src/core/events.js';
-import { applyChoice } from '../src/core/engine.js';
-import { evaluateRetirement, endingName } from '../src/core/endings.js';
-import { headcount } from '../src/core/staff.js';
-import { acceptOffer, suggestContract } from '../src/core/contracts.js';
-import { useSkill, SKILL_IDS } from '../src/core/skills.js';
+import { rates, derived, lowestLine, costFor, lineLevel, peOf } from '../src/core/economy.js';
+import { tick, pendingEvent, resolvePending, manualBuy, setFocus } from '../src/core/engine.js';
+import { CURVE_RATIO, MANUAL_GAIN } from '../src/core/content.js';
+import {
+  render, renderEnding, renderOffline, renderSettings, closeModal, setTab,
+  armDeleteSave, deleteSaveArmed, disarmDeleteSave,
+} from '../src/ui/render.js';
+import { bindActions, ACTION_KEYS, PRIMARY_EVENT } from '../src/ui/bind.js';
 
-// ─────────────────────────── 极简 DOM ───────────────────────────
-function makeNode(tag = 'div') {
-  const n = {
-    tagName: tag, className: '', innerHTML: '', textContent: '',
-    dataset: {}, disabled: false, children: [], parentNode: null, style: { setProperty() {} },
-    appendChild(c) { c.parentNode = n; n.children.push(c); return c; },
-    removeChild(c) { n.children = n.children.filter(x => x !== c); c.parentNode = null; return c; },
-    remove() { if (n.parentNode) n.parentNode.removeChild(n); },
-    querySelectorAll() { return []; },
-    querySelector() { return null; },
-    addEventListener() {},
-    closest() { return null; },
+installDom();
+
+const app = makeNode('div');
+const overlay = makeNode('div');
+
+/** 容器：把事件处理器记下来，好让我们手工派发 */
+function recorder() {
+  const n = makeNode('div');
+  n.handlers = [];
+  n.addEventListener = (type, fn, capture) => { n.handlers.push({ type, fn, capture }); };
+  n.removeEventListener = () => {};
+  n.fire = (type, ev) => {
+    for (const h of n.handlers) if (h.type === type) h.fn(ev);
   };
   return n;
 }
-globalThis.document = {
-  createElement: makeNode,
-  getElementById: () => null,
-  addEventListener() {},
-  body: makeNode('body'),
-};
-globalThis.performance = globalThis.performance || { now: () => Date.now() };
+const appBox = recorder();
+const overlayBox = recorder();
 
-/** 把渲染出来的 HTML 里所有「可点按钮」解析出来（含 disabled 状态） */
-function buttonsIn(html) {
-  const out = [];
-  const re = /<button\b([^>]*)>([\s\S]*?)<\/button>/g;
-  let m;
-  while ((m = re.exec(html))) {
-    const attrs = m[1];
-    const label = m[2].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    const data = {};
-    const dre = /data-([a-z0-9]+)="([^"]*)"/g;
-    let d;
-    while ((d = dre.exec(attrs))) data[d[1]] = d[2];
-    // disabled 是裸属性，用「属性边界」精确匹配，避免命中 "not-disabled" 之类
-    const disabled = /(^|\s)disabled(\s|$)/.test(attrs.replace(/data-[a-z0-9]+="[^"]*"/g, ''));
-    out.push({ data, label, disabled });
-  }
-  return out;
+/**
+ * 从一段 HTML 里挑一个按钮，做成「可派发的事件目标」。
+ * `closest` 是 `bind.js` 唯一的取值口径（`findActionEl` = `target.closest(ACTION_SELECTOR)`），
+ * 所以这里只需让它**认自己**；`.modal` 那一支留给 `closeModal`。
+ */
+function clickable(btn, modal = null) {
+  const el = {
+    dataset: { ...btn.data },
+    disabled: !!btn.disabled,
+    closest(sel) {
+      if (sel === '.modal') return modal;
+      return Object.keys(el.dataset).length ? el : null;
+    },
+  };
+  return el;
+}
+const ev = extra => ({ target: null, cancelable: true, detail: 1, stopPropagation() {}, preventDefault() {}, ...extra });
+
+// ─────────────────────────── dispatch（main.js 的抄件）───────────────────────────
+let s = createState();
+const realWipe = () => { store.delete('abstract-studio.save.v1'); };
+const store = new Map();
+globalThis.localStorage = {
+  getItem: k => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: k => store.delete(k),
+};
+
+let deletes = 0;
+const handlers = {
+  buy(id) { if (manualBuy(s, id)) draw(); },
+  opt(arg) {
+    const [uid, i] = String(arg).split(':');
+    if (resolvePending(s, Number(uid), Number(i), rates(s))) draw();
+  },
+  close() { draw(); },
+  settings() { renderSettings(overlay, s); },
+  speed(v) { s.speed = Number(v) || 1; draw(); },
+  tab(i) { setTab(i); draw(); },
+  focus(id) { if (setFocus(s, id)) draw(); },
+  retire() { /* 结局弹窗由 draw() 负责，这里只记一笔 */ retires += 1; },
+  delete() {
+    // 两步确认：与 main.js 同源 —— 用 render.js 的武装态，而不是本地另立一份
+    if (!deleteSaveArmed()) { armDeleteSave(); renderSettings(overlay, s); return; }
+    disarmDeleteSave();
+    deletes += 1;
+    realWipe();
+  },
+};
+let retires = 0;
+
+function dispatch(el) {
+  const d = el.dataset;
+  if (d.buy !== undefined) return handlers.buy(d.buy);
+  if (d.opt !== undefined) return handlers.opt(d.opt);
+  if (d.speed !== undefined) return handlers.speed(d.speed);
+  if (d.tab !== undefined) return handlers.tab(d.tab);
+  if (d.focus !== undefined) return handlers.focus(d.focus);
+  if (d.settings !== undefined) return handlers.settings();
+  if (d.retire !== undefined) return handlers.retire();
+  if (d.delete !== undefined) return handlers.delete();
+  // 关闭与 main.js 同源：调 render.js 的 closeModal（它负责**把 overlay 清空**）
+  if (d.close !== undefined) { closeModal(overlay); return handlers.close(); }
 }
 
-/** 找第一个匹配 data 键（且未 disabled）的按钮 */
-const findBtn = (btns, key) => btns.find(b => b.data[key] !== undefined && !b.disabled) || null;
+bindActions({ app: appBox, overlay: overlayBox }, dispatch);
+
+/** 主界面 + 弹窗都重画一遍 */
+function draw() { render(app, s); }
+draw();
 
 // ─────────────────────────── 断言 ───────────────────────────
-let pass = 0; const fails = [];
-const check = (name, ok, extra = '') => { if (ok) pass++; else fails.push(`${name}${extra ? ' —— ' + extra : ''}`); };
+const rows = [];
+const check = (name, ok, note = '') => { rows.push({ name, ok: !!ok, note }); return !!ok; };
 
-// ─────────────────────────── 模拟一局（全部靠「点」）───────────────────────────
-console.log('');
-console.log('  ╔══════════════════════════════════════════════════════════════════════════╗');
-console.log('  ║  真实点击模拟：从渲染结果里找按钮 → 走事件委托 → 断言每一步真的生效      ║');
-console.log('  ╚══════════════════════════════════════════════════════════════════════════╝');
-console.log('');
-
-const root = makeNode('div');
-const overlay = makeNode('div');
-
-// 与 main.js 的 dispatch 同构（手抄副本）：解析 dataset → 调 handler。
-// ⚠️ 「同构」不是「同一段代码」—— 新增触发路径必须同步抄过来，漏抄不会报错、只会静默失效
-//    （本轮实测：漏了「幕自动推进 → 弹抉择」，`s.choices` 一直是 0）。
-function click(b) {
-  const d = b.data;
-  if (d.tab !== undefined) return;
-  if (d.buy !== undefined) { purchase(s, d.buy, Number(d.k || 1)); return; }
-  if (d.act === 'retire') { retiring = true; return; }
-  if (d.act === 'toggleMute') { s.muted = !s.muted; return; }
-  if (d.choice !== undefined) { applyChoice(s, d.choice); choiceModal = false; return; }
-  if (d.opt !== undefined) { resolveEvent(s, Number(d.opt), rates(s)); return; }
-  if (d.bid !== undefined) { const [id, q] = d.bid.split(':'); acceptOffer(s, id, q, rates(s)); return; }
-  /**
-   * 三人技能（GDD 4.5）。`main.js` 的接线是 `if (d.skill !== undefined) return handlers.skill(...)`。
-   *
-   * ⚠️ 这条曾经**漏抄**（本文件顶部那条警告说的就是这个病）：
-   * 2026-09-26 代码 / 人脉两条链并入资金后，`skillFactors().money`（1.44 → 增益期 ~13）
-   * 成了资金产出**唯一**的乘数级增长源，于是「没点技能」从「少赚一点」变成**致命**——
-   * 同一个模拟从 5.7 h 通关退化成第 7 幕卡死 400 h（净利率被 salaryFrac + scaleFrac
-   * 吃到 ≈ 0，压力机制反复卖设施又买回来，市值再也涨不动）。
-   * 漏抄不会报错，只会静默失效，所以这里补上，并在末尾加一条断言守着它。
-   */
-  if (d.skill !== undefined) { if (useSkill(s, d.skill)) skillPresses++; return; }
-}
-
-const s = createState();
-s.rngSeed = 20260809;
-let choiceModal = false, retiring = false, retired = false, ending = null;
-let skillPresses = 0;               // 技能行按钮真的被点到过几次（末尾断言用）
-let lmSeen = false;                 // 地标按钮断言只报一次，避免刷屏
-/** 上一帧看到的幕次 —— 与 main.js 的 draw() 同名游标，用途见下方循环里的 hook */
-let lastAct = s.act;
-
-/** 渲染一次，返回「玩家能看到的按钮」 */
-function look(tab) {
-  render(root, s, tab, { setTab() {}, buy() {}, choice() {}, retire() {}, bid() {}, drop() {}, capital() {}, skill() {}, toggleMute() {} });
-  return buttonsIn(root.innerHTML);
-}
-
-const T0 = process.hrtime.bigint();
-let seconds = 0;
-const LIMIT = 400 * 3600;
-let think = 0;
-
-while (seconds < LIMIT && !retired) {
-  const R = rates(s);
-  tick(s, 1);
-  seconds += 1;
-
-  // 与 main.js 的 draw() 同构：幕由 `tick` 自动推进（玩家不点任何按钮），
-  // 所以这里必须自己发现「进了新幕」并把路线抉择弹出来 —— 少了这一步，
-  // `s.choices` 永远是空的（实测：0 次），「选路」这条玩家必经的接线就等于没被覆盖。
-  if (s.act !== lastAct) { lastAct = s.act; choiceModal = true; }
-
-  // ── 弹窗优先级：抉择事件 → 路线抉择（都和浏览器里一样，必须先点掉）
-  const ev = pendingEvent(s);
-  if (ev) {
-    // 弹窗必须渲染在 overlay（stub 的 appendChild 会记进 children，用它断言结构）
-    while (overlay.children.length) overlay.removeChild(overlay.children[0]);
-    renderEvent(overlay, ev, () => {}, () => true);
-    check('事件弹窗渲染到了 #overlay（不在 #app，否则活不过一帧）', overlay.children.length === 1);
-    check('弹窗里的按钮在界面上真实存在', buttonsIn(overlay.children[0].innerHTML).some(x => x.data.opt !== undefined));
-    const btns = buttonsIn(overlay.children[0].innerHTML).filter(x => x.data.opt !== undefined);
-    const b = btns.find(x => !x.disabled) || btns[0];
-    if (b) click(b);
-    continue;
-  }
-  if (choiceModal) {
-    while (overlay.children.length) overlay.removeChild(overlay.children[0]);
-    renderChoice(overlay, s.act, () => {});
-    const b = findBtn(buttonsIn(overlay.children[0].innerHTML), 'choice');
-    if (b) click(b);
-    continue;
-  }
-  /**
-   * 点了退休（`main.js` 的 `retire() { finishRetirement(); }`）。
-   * 第三批（2026-09-26）结局收敛为唯一一个：判据是退休那一刻 `s.worldRank === 1`。
-   * 走到第 8 幕 ⇒ 市值已越过终章门槛（远超世界榜首）⇒ 名次必为 1 ⇒ 判「登顶」。
-   */
-  if (retiring) {
-    const res = evaluateRetirement(s);
-    ending = res.ending;
-    retired = true;
-    break;
-  }
-
-  // ── 正常操作：每 10 秒看一眼界面、点一次 ──
-  think += 1;
-  if (think % 10) continue;
-
-  const btns = look(0);                       // 主界面（技能行与地标的购买按钮都在这里）
-  // 三人技能「就绪就放」：线上唯一的入口是 HUD 技能行的按钮（`render.js` 的 data-skill），
-  // 后台没有自动释放（`engine.autoSkillTick` 只在自检里打开）——玩家不点就是没点，必须模拟出来。
-  const skBtn = btns.find(b => b.data.skill !== undefined && !b.disabled);
-  if (skBtn) click(skBtn);
-  if (card1(btns)) continue;
-  const blds = look(1);                       // 建设页
-
-  // 该买地标了吗 —— 按钮必须**在界面上真的存在**（这就是本次报的那个 bug）
-  const lmId = ACTS[s.act].landmark;
-  if ((s.buildings[lmId] || 0) === 0 && canAfford(s, lmId)) {
-    const lmBtn = btns.find(b => b.data.buy === lmId && b.data.k === '1');
-    if (!lmSeen) { lmSeen = true; check(`地标「${lmId}」买得起时，界面上有购买按钮`, !!lmBtn); }
-    if (lmBtn) click(lmBtn);
-    continue;
-  }
-  // 顺手点掉顾问建议
-  const sug = suggestContract(s, R);
-  if (sug) {
-    const biz = look(2);
-    const bidBtn = biz.find(b => b.data.bid && b.data.bid.startsWith(sug.offerId + ':'));
-    if (bidBtn) { click(bidBtn); continue; }
-  }
-  // ⚠️ 这里**删掉**了原先「找 `data-staff` 按钮 → 点它来培训」的一段：
-  //    4 页 UI 里根本没有员工页（`render.js` 全库 0 处 `data-staff`），那段永不命中 ——
-  //    既不是有效断言，也不是死代码保护，只是一句假装存在的接线。
-  //    培训现在唯一的入口是后台自动化（`engine.autoStaffTick`，跑在 `tick` 里、无需按钮），
-  //    所以对它的看守改成**循环结束后的断言**（见下方「员工培训由后台自动化执行」）。
-  // 买最便宜的建筑（模拟「有钱就花」）
-  let best = null, bc = Infinity;
-  for (const bb of BUILDINGS) {
-    if (bb.kind === 'landmark' || !unlocked(s, bb.id) || !canAfford(s, bb.id)) continue;
-    const c = costOf(bb.id, s.buildings[bb.id] || 0);
-    if (c.amount < bc) { bc = c.amount; best = bb.id; }
-  }
-  if (best) {
-    const bb = blds.find(x => x.data.buy === best && x.data.k === '1');
-    if (bb) click(bb);
-  }
+/** 一个选项在对数市值上的增量（与 headless-check 同一口径，用来挑「最优选项」） */
+function logCapDelta(eff, R) {
+  if (!eff) return 0;
+  let d = 0;
+  if (eff.cash) d += ((eff.cash * R.revenue) / costFor(s, 'r')) * Math.log(CURVE_RATIO) / 3;
+  for (const k of ['prod', 'share', 'team']) if (eff[k]) d += Math.log(eff[k]);
+  if (eff.pe) d += Math.log(Math.max(1e-9, (peOf(s) + eff.pe) / peOf(s)));
+  return d;
 }
 
 /**
- * 主界面上的大按钮：第 8 幕的「关灯 · 退休」。
- * ⚠️ 必须按 `data-act` 的**值**找，不能用「有没有 data-act」找 ——
- *    页头还有 speed1 / speed4 / speed8 / toggleMute 四个同样带 data-act 的按钮，
- *    按存在性找会先命中它们，导致按钮永远点不到（这里踩过）。
- * ⚠️ 「进入下一幕」按钮本批已删（幕改由市值门槛在 `tick` 里自动推进），
- *    所以这里只剩退休 —— 它仍要能点，否则模拟永远走不到结局。
+ * 派发一次「点击」：从 HTML 找按钮 → 造元素 → 走容器上的 `PRIMARY_EVENT`。
+ * 返回是否真的派发成功了（找不到按钮 = false，调用方据此判缺陷）。
  */
-function card1(btns) {
-  const adv = btns.find(b => b.data.act === 'retire' && !b.disabled);
-  if (adv) { click(adv); return true; }
-  return false;
+function clickFirst(html, box, key, modal = null) {
+  const btn = findBtn(buttonsIn(html), key);
+  if (!btn) return null;
+  const el = clickable(btn, modal);
+  box.fire(PRIMARY_EVENT, ev({ target: el }));
+  return btn;
 }
 
-/**
- * 员工培训的接线断言（2026-09-25 Task 4 修复轮）。
- *
- * ⚠️ 这里曾经是「找 `data-staff` 按钮 → 点它」的一段**操作**，但 4 页 UI 里没有员工页
- *    （`render.js` 全库 0 处 `data-staff`），那段永不命中：既不是有效断言，也不是死代码保护。
- *    培训现在唯一的入口是后台自动化 `engine.autoStaffTick`（跑在 `tick` 里、不需要任何按钮），
- *    所以改成**断言**：跑到最后确实有员工被练上了级。少了它，「培训是否真的在自动发生」
- *    就又成了一条无人看守的静默路径 —— 与 F1 那条「漏抄触发路径」是同一类病。
- */
-check('员工培训由后台自动化执行（无需任何按钮）',
-  STAFF.some(g => s.staff[g.id].level > 1 && headcount(s, g.id) > 0),
-  `终局等级 ${STAFF.map(g => `${g.id}:L${s.staff[g.id].level}`).join(' ')}`);
+let sawOpt = 0;
+let sawBuy = 0;
+let sawSpeed = 0;
+const seenKeys = new Set();
 
-/**
- * ⚠️ 整局健康的三个**承重**断言（2026-09-25 最终修复波 W1）。
- *
- * 为什么必须有牙：下面「关键节点」那三行原本只是 `console.log`，从不进 `check()`，
- * 而退出码只看 `fails.length` —— 于是「卡在第 2 幕 + 0 次抉择 + 无结局 + 超时」这种
- * **整局退化**仍然退出码 0、报 0 失败（Task 4 的 F1 正是这样溜过审查的）。
- * click-sim 是仓库里唯一一条端到端闸门（`probe` 结构上补不上「真渲染 → 找按钮 → 断言生效」
- * 这个洞），所以它必须能失败：测不出通关就不能退出码 0。
- */
-check('走到第 8 幕（幕由市值门槛自动推进，无需玩家操作）', s.act === 8, `实为第 ${s.act} 幕`);
-check('至少发生一次路线抉择（「进新幕弹抉择」的接线生效）', s.choices.length >= 1, `实为 ${s.choices.length} 次`);
-check('走到结局', !!ending, '模拟结束时没有结局');
-/**
- * 技能行这条接线的牙：漏抄 `data-skill` 会让整局在第 7 幕卡死 400 h（见 `click()` 里的警告），
- * 而它**不会**让任何别的断言失败 —— 只会让时长悄悄变成 70 倍。所以这里必须硬判。
- */
-check('三人技能由 HUD 技能行的按钮释放（main.js 的 data-skill 接线）',
-  skillPresses >= SKILL_IDS.length,
-  `实为 ${skillPresses} 次，${SKILL_IDS.length} 个技能各至少该放一次`);
+// ── ① 主界面按钮审计：渲染出来的每个 data-* 动作键都必须在 ACTION_KEYS 里 ──
+{
+  const btns = buttonsIn(app.innerHTML);
+  const stray = [];
+  for (const b of btns) {
+    for (const k of Object.keys(b.data)) {
+      seenKeys.add(k);
+      if (!ACTION_KEYS.includes(k)) stray.push(`data-${k}`);
+    }
+  }
+  check('主界面渲染出的动作键全部落在 ACTION_KEYS 内', stray.length === 0, stray.join('、'));
+  check('主界面存在三条投资线按钮（data-buy）', btns.filter(b => b.data.buy !== undefined).length === 3,
+    `实际 ${btns.filter(b => b.data.buy !== undefined).length} 个`);
+  check('主界面存在倍速按钮（data-speed）', btns.some(b => b.data.speed !== undefined));
+}
 
-const ms = Number(process.hrtime.bigint() - T0) / 1e6;
+// ── ①b 页签：切页真的换内容，而且这个态住在模块里（全量重建不会丢）──
+{
+  /** 从当前渲染结果里点指定页签 —— `clickFirst` 按「有没有这个键」找，页签必须按值找 */
+  const clickTab = i => {
+    const btn = buttonsIn(app.innerHTML).find(b => b.data.tab === String(i));
+    if (!btn) return false;
+    appBox.fire(PRIMARY_EVENT, ev({ target: clickable(btn) }));
+    return true;
+  };
+  check('主界面给了两个页签（公司 / 市值榜）',
+    buttonsIn(app.innerHTML).filter(b => b.data.tab !== undefined).length === 2);
+  check('开局停在「公司」页：有投资线、没有榜单',
+    buttonsIn(app.innerHTML).some(b => b.data.buy !== undefined) && !app.innerHTML.includes('世界市值榜'));
 
-// ─────────────────────────── 报告 ───────────────────────────
-console.log('  ── 关键节点 ──');
-console.log(`  车库是否买成：${(s.buildings.garage || 0) >= 1 ? '✅' : '❌'} ｜ 当前第 ${s.act}/8 幕 ｜ 模拟 ${(seconds / 3600).toFixed(1)} 游戏小时`);
-console.log(`  路线抉择是否生效：${s.choices.length ? '✅ ' + s.choices.length + ' 次' : '❌ 一次都没选'} ｜ 已发生事件 ${s.events.count} 次`);
-console.log(`  是否走到结局：${ending ? '✅ 「' + endingName(ending) + '」' : '❌ 没走到'}`);
+  check('点「市值榜」切得动', clickTab(1));
+  check('切到「市值榜」：榜单出现、投资线让位',
+    app.innerHTML.includes('世界市值榜') && !buttonsIn(app.innerHTML).some(b => b.data.buy !== undefined));
+  check('未上市时榜单里没有玩家行（未上市不进榜）', !app.innerHTML.includes('class="row me"'));
+
+  draw();   // 整页重建一次 —— 页签状态若留在 DOM 上，这一下就会弹回「公司」
+  check('页签状态住在模块里：重建一帧后仍停在「市值榜」', app.innerHTML.includes('世界市值榜'));
+
+  check('切回「公司」恢复投资线',
+    clickTab(0) && buttonsIn(app.innerHTML).some(b => b.data.buy !== undefined));
+}
+
+// ── ①c 自动购买方向（§1.6）：四个方向按钮 + 选中态跟着走 ──
+{
+  const btns = buttonsIn(app.innerHTML).filter(b => b.data.focus !== undefined);
+  check('公司页给了四个自动方向按钮（均衡 + 三条线）', btns.length === 4, `实际 ${btns.length} 个`);
+  check('默认选中「均衡」（even）',
+    s.focus === 'even' && app.innerHTML.includes('data-focus="even"') && /class="ic on" data-focus="even"/.test(app.innerHTML));
+
+  const r = btns.find(b => b.data.focus === 'r');
+  appBox.fire(PRIMARY_EVENT, ev({ target: clickable(r) }));
+  check('点「投研发」真的改了方向，并且只亮它一个',
+    s.focus === 'r' && /class="ic on" data-focus="r"/.test(app.innerHTML) && !/class="ic on" data-focus="even"/.test(app.innerHTML),
+    `s.focus=${s.focus}`);
+  check('方向态住在模块里：整页重建一帧后仍是「投研发」',
+    (draw(), s.focus === 'r' && /class="ic on" data-focus="r"/.test(app.innerHTML)));
+  s.focus = 'even';    // 复位：后面的整局回放要按默认（均衡）跑
+}
+
+// ── ② 倍速按钮：真实接线走一遍 ──
+{
+  const before = s.speed;
+  // 三个倍速键（1× / 4× / 8×）都点一遍 —— 只点第一个（1×）等于没验
+  const boxes = buttonsIn(app.innerHTML).filter(b => b.data.speed !== undefined);
+  check('主界面给了 1× / 4× / 8× 三个倍速按钮', boxes.length === 3, `实际 ${boxes.length} 个`);
+  for (const b of boxes) {
+    appBox.fire(PRIMARY_EVENT, ev({ target: clickable(b) }));
+    sawSpeed += 1;
+  }
+  check('依次点过全部倍速按钮后 s.speed 落在最后一个（8×）',
+    sawSpeed >= 3 && s.speed === Number(boxes[boxes.length - 1].data.speed), `${before} → ${s.speed}`);
+  s.speed = 1;
+}
+
+// ── ③ 手动点击买一条线（走 dispatch → handlers.buy → manualBuy）──
+{
+  s.money = costFor(s, 'r') * 3;
+  const lvBefore = lineLevel(s, 'r');
+  const costBefore = costFor(s, 'r');
+  const hit = clickFirst(app.innerHTML, appBox, 'buy');
+  check(`点击投资线按钮真的买下了（等级 +${MANUAL_GAIN}）`,
+    !!hit && lineLevel(s, 'r') === lvBefore + MANUAL_GAIN, `${lvBefore} → ${lineLevel(s, 'r')}`);
+  // ⚠️ 用相对容差：`3c − c` 与 `2c` 在 IEEE754 下可能差 1 ulp（c 不是 2 的幂）
+  check('手动只扣一级的钱（涨两级 ≠ 付两级的钱）',
+    !!hit && Math.abs(s.money - 2 * costBefore) <= costBefore * 1e-9,
+    `预期 ${2 * costBefore}，实得 ${s.money}`);
+  if (hit) sawBuy += 1;
+}
+
+// ── ④ 设置弹窗 + 两步删档 ──
+{
+  clickFirst(app.innerHTML, appBox, 'settings');
+  check('点 ⚙ 弹出设置弹窗（data-delete / data-close 都在）',
+    overlay.innerHTML.includes('data-delete') && overlay.innerHTML.includes('data-close'));
+
+  const modal = makeNode('div');
+  modal.className = 'modal';
+  overlay.appendChild(modal);
+  clickFirst(overlay.innerHTML, overlayBox, 'delete', modal);
+  check('第一次点「删除全部数据」只进入确认态，不执行删除',
+    deletes === 0 && overlay.innerHTML.includes('再点一次'), `deletes=${deletes}`);
+  clickFirst(overlay.innerHTML, overlayBox, 'delete', modal);
+  check('第二次点击才真正执行删档', deletes === 1, `deletes=${deletes} | 存档键 ${[...store.keys()].length}`);
+  check('删档确认是两步（不是一个按钮点一次）', deletes === 1);
+
+  // 关闭：只有带 data-close 的按钮才关得掉
+  renderSettings(overlay, s);
+  clickFirst(overlay.innerHTML, overlayBox, 'close');
+  check('点 data-close 后 overlay 真正清空（#overlay:empty 成立 ⇒ 遮罩不留残影）',
+    overlay.innerHTML === '', `innerHTML=${JSON.stringify(overlay.innerHTML.slice(0, 24))}`);
+
+  // 遮罩若残留就吃掉全页点击 —— 用户报的「关掉设置后倍速失效」正是这一条
+  const eight = buttonsIn(app.innerHTML).find(b => b.data.speed === '8');
+  appBox.fire(PRIMARY_EVENT, ev({ target: clickable(eight) }));
+  check('关掉弹窗后主界面按钮仍然点得到（点 8× ⇒ s.speed = 8）', s.speed === 8, `speed=${s.speed}`);
+  s.speed = 1;                                   // 复位：后面那一局按 1× 跑
+}
+
+// ── ⑤ 跑到结局：每一帧都从渲染出的 HTML 里找按钮来点 ──
+const T0 = Date.now();
+let steps = 0;
+let renders = 0;
+const STEP = 1;           // 逻辑步长（秒）
+const MAX_STEPS = 40000;  // 40 000 秒 = 11 小时，远超一局
+let lastRenderAt = -1e9;
+
+while (!s.ending && steps < MAX_STEPS) {
+  steps += 1;
+  tick(s, STEP);
+
+  const evPending = pendingEvent(s);
+  // 只在「有待决」或「距上次重画超过 600 秒」时重画 —— render 是整页重建 + 105 家排序，
+  // 每帧都画会把回放拖到分钟级，而我们要验的是「按钮能不能被找到」，不是渲染性能。
+  const due = evPending || steps - lastRenderAt >= 600;
+  if (!due) continue;
+  lastRenderAt = steps;
+  renders += 1;
+  draw();
+
+  if (evPending) {
+    const btns = buttonsIn(app.innerHTML);
+    for (const b of btns) for (const k of Object.keys(b.data)) seenKeys.add(k);
+    const opts = btns.filter(b => b.data.opt !== undefined);
+    check(`待决「${evPending.title}」在主界面上给出了两个可点的选项`, opts.length === 2, `实际 ${opts.length} 个`);
+    const R = rates(s);
+    const a = logCapDelta(evPending.options[0].eff, R);
+    const b = logCapDelta(evPending.options[1].eff, R);
+    const want = a >= b ? 0 : 1;
+    const el = clickable(opts[want]);
+    appBox.fire(PRIMARY_EVENT, ev({ target: el }));
+    sawOpt += 1;
+    if (s.pending.some(p => p.uid === Number(opts[want].data.opt.split(':')[0]))) {
+      check('点击选项后那条待决仍未结算', false, 'uid 未出队');
+      break;
+    }
+  } else {
+    // 手动点击 = 从界面里找「等级最低」那条线的按钮（与自动购买同一个解）
+    const want = lowestLine(s);
+    const btn = buttonsIn(app.innerHTML).find(b => b.data.buy === want && !b.disabled);
+    if (btn && s.money >= costFor(s, want)) {
+      appBox.fire(PRIMARY_EVENT, ev({ target: clickable(btn) }));
+      sawBuy += 1;
+    }
+  }
+}
+draw();
+
+check('从渲染出的 HTML 里真的点到过待决选项（不是空转）', sawOpt >= 20, `${sawOpt} 次`);
+check('从渲染出的 HTML 里真的点到过投资线按钮（不是空转）', sawBuy >= 1, `${sawBuy} 次`);
+check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.ending ?? 'null'}`);
+
+// ── ⑤b 登顶即定格：时间冻结、全部计算暂停、界面只剩回看 ──
+{
+  const money = s.money;
+  const elapsed = s.elapsed;
+  const stage = s.stage;
+  const lv = lineLevel(s, 'r');
+  draw();
+  const btns = buttonsIn(app.innerHTML);
+  const buys = btns.filter(b => b.data.buy !== undefined);
+  const speeds = btns.filter(b => b.data.speed !== undefined);
+  check('定格：主界面挂出「已登顶 · 时间冻结」', app.innerHTML.includes('已登顶 · 时间冻结'));
+  check('定格：投资线与倍速按钮全部 disabled（只剩回看）',
+    buys.length === 3 && speeds.length === 3 && [...buys, ...speeds].every(b => b.disabled),
+    `投资线 ${buys.filter(b => b.disabled).length}/3、倍速 ${speeds.filter(b => b.disabled).length}/3`);
+  // 真派发一次 pointerdown：disabled 的元素必须被 bind.js 直接跳过
+  if (buys[0]) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(buys[0]) }));
+  tick(s, 600);                                  // 10 分钟的等效时间：不许发生任何事
+  check('定格：点击 + 600 秒 tick 后现金/时间/等级/阶段一个都没动',
+    s.money === money && s.elapsed === elapsed && s.stage === stage && lineLevel(s, 'r') === lv);
+}
+
+// ── ⑥ 结局弹窗 + 关灯 ──
+{
+  renderEnding(overlay, s);
+  check('结局弹窗渲染出来了（含 data-close「关灯」）', overlay.innerHTML.includes('data-close'));
+  clickFirst(overlay.innerHTML, overlayBox, 'close');
+  check('点「关灯」后 overlay 真正清空（结局弹窗不留残影）',
+    overlay.innerHTML === '', `innerHTML=${JSON.stringify(overlay.innerHTML.slice(0, 24))}`);
+}
+
+// ── ⑦ 离线报告弹窗 ──
+{
+  renderOffline(overlay, { capped: 8 * 3600, cappedOut: true, equiv: 4320, report: { stageFrom: 1, stageTo: 2, cashGained: 1.23e6, overflowed: 2, pending: 1 } });
+  check('离线报告只给一份（单一弹窗，且有关闭按钮）',
+    (overlay.innerHTML.match(/class="modal"/g) || []).length === 1 && overlay.innerHTML.includes('data-close'));
+  check('离线报告不再显示名次行（§1.7 精简）', !overlay.innerHTML.includes('名次'));
+  clickFirst(overlay.innerHTML, overlayBox, 'close');
+  check('离线报告关掉后 overlay 真正清空（不留遮罩）',
+    overlay.innerHTML === '', `innerHTML=${JSON.stringify(overlay.innerHTML.slice(0, 24))}`);
+}
+
+// ── ⑧ 派发路径审计 ──
+{
+  check('主事件是 pointerdown（不是 click）', PRIMARY_EVENT === 'pointerdown', PRIMARY_EVENT);
+  const missing = ACTION_KEYS.filter(k => !['buy', 'opt', 'speed', 'tab', 'focus', 'settings', 'retire', 'delete', 'close'].includes(k));
+  check('dispatch 覆盖了全部 ACTION_KEYS', missing.length === 0, missing.join('、'));
+  check(`走完整局一共见到 ${seenKeys.size} 种动作键，没有越界的`, [...seenKeys].every(k => ACTION_KEYS.includes(k)),
+    [...seenKeys].filter(k => !ACTION_KEYS.includes(k)).join('、'));
+}
+
+// ─────────────────────────── 输出 ───────────────────────────
+const pass = rows.filter(r => r.ok).length;
+const fails = rows.filter(r => !r.ok);
+console.log('');
+console.log('  🖱  点击链路回放（HTML → 按钮 → pointerdown → dispatch）');
+console.log('  ─'.repeat(34));
+console.log(`  逻辑步数 ${steps} ｜ 整页重画 ${renders} 次 ｜ 点击决策 ${sawOpt} 次 ｜ 点击投资线 ${sawBuy} 次`);
+console.log(`  终局：${s.ending === 'top' ? '登顶 ✅' : '未登顶 ❌'} ｜ 决策 ${s.decisions} 次 ｜ 耗时 ${((Date.now() - T0) / 1000).toFixed(1)}s`);
+console.log('');
+for (const r of rows) console.log(`  ${r.ok ? '✅' : '❌'} ${r.name}${r.note ? `　（${r.note}）` : ''}`);
+console.log('');
+console.log(`  ${pass}/${rows.length} 项通过${fails.length ? `，${fails.length} 项失败` : ''}`);
 console.log('');
 
-console.log('  ── 结构约束（这次 bug 的根因就在这里）──');
-check('render() 产出的 HTML 里没有弹窗（弹窗只能挂在 overlay）', !root.innerHTML.includes('class="modal"'));
-console.log(`  ${root.innerHTML.includes('class="modal"') ? '❌' : '✅'} 弹窗一律挂在 #app 之外（#overlay）—— 否则会被下一帧 innerHTML 重建擦掉`);
-console.log('');
-
-console.log('  ── 断言 ──');
-for (const f of fails) console.log('  ❌ ' + f);
-console.log(`  ${pass} 项通过${fails.length ? `，${fails.length} 项失败` : ''} ｜ 耗时 ${(ms / 1000).toFixed(1)}s`);
-console.log('');
 console.log('BRIEF ' + JSON.stringify({
-  act: s.act, garage: s.buildings.garage || 0, choices: s.choices.length,
-  events: s.events.count, ending, hours: +(seconds / 3600).toFixed(1), skills: skillPresses, pass, fail: fails.length,
+  pass, fail: fails.length, failed: fails.map(f => f.name),
+  ending: s.ending, steps, renders, sawOpt, sawBuy,
+  decisions: s.decisions, seconds: +(steps).toFixed(0),
+  levels: { ...s.lines },
 }));
-console.log('');
-process.exit(fails.length ? 1 : 0);

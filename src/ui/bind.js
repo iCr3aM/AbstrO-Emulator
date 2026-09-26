@@ -39,13 +39,13 @@
 /**
  * 所有「动作键」——渲染出的 `data-*` 必须落在这里面，否则点了没反应。
  *
- * ⚠️ 重制版（v4）的动作面收敛到七条：点一条投资线、结算一条待决、关弹窗、
- *    退休、设置、删档、调倍速。旧版的 `tab / choice / act / bid / skill /
- *    intro / fold / mute` 对应的系统（标签页、三选一、合同、技能、开幕剧情、折叠块、音效）
+ * ⚠️ 重制版（v4）的动作面收敛到九条：点一条投资线、结算一条待决、关弹窗、
+ *    退休、设置、删档、调倍速、切页签、选自动购买方向。旧版的 `choice / act / bid / skill /
+ *    intro / fold / mute` 对应的系统（三选一、合同、技能、开幕剧情、折叠块、音效）
  *    已全部删除。
  */
 export const ACTION_KEYS = [
-  'buy', 'opt', 'close', 'retire', 'settings', 'delete', 'speed',
+  'buy', 'opt', 'close', 'retire', 'settings', 'delete', 'speed', 'tab', 'focus',
 ];
 
 /**

@@ -9,11 +9,11 @@
 
 import { createState } from './core/state.js';
 import { save, load, applyOffline, wipe, disableSave } from './core/save.js';
-import { createLoop, tick, resolvePending } from './core/engine.js';
-import { rates, purchase } from './core/economy.js';
+import { createLoop, tick, resolvePending, manualBuy, setFocus } from './core/engine.js';
+import { rates } from './core/economy.js';
 import { evaluateRetirement } from './core/endings.js';
 import {
-  render, renderOffline, renderSettings, renderEnding, renderNotTop,
+  render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab,
   armDeleteSave, deleteSaveArmed, disarmDeleteSave,
 } from './ui/render.js';
 import { bindActions } from './ui/bind.js';
@@ -60,7 +60,9 @@ function fatal(where, err) {
 let offlineNotice = null;
 try {
   const off = applyOffline(s, Date.now());
-  if (off.capped > 60 && off.report) offlineNotice = off;
+  // 已登顶的档是**定格**的（`engine.tick` 直接返回）：离线什么也不会发生，
+  // 再弹一份「离开的这段时间」只会是一张全零的报告。
+  if (off.capped > 60 && off.report && !s.ending) offlineNotice = off;
 } catch (err) {
   fatal('离线结算', err);
 }
@@ -69,8 +71,8 @@ try {
 try { tick(s, 0); } catch (err) { fatal('初始化', err); }
 
 const handlers = {
-  /** 手动点击 = 立即买下你点的那一条（与自动购买同一个函数，只影响顺序） */
-  buy(id) { if (purchase(s, id)) draw(); },
+  /** 手动点击 = 立即买下你点的那一条（与自动购买同一个函数，一次两级） */
+  buy(id) { if (manualBuy(s, id)) draw(); },
 
   /** 结算一条待决事件 */
   opt(arg) {
@@ -81,6 +83,10 @@ const handlers = {
   close() { draw(); },
   settings() { renderSettings(overlay, s); },
   speed(v) { s.speed = Number(v) || 1; draw(); },
+  tab(i) { setTab(i); draw(); },
+
+  /** 自动购买的方向：只改一个字段，`nextLine` 下一 tick 就照它走 */
+  focus(id) { if (setFocus(s, id)) { save(s); draw(); } },
 
   /** 退休：登顶 ⇒ 唯一结局；未登顶 ⇒ 只提示，游戏继续 */
   retire() {
@@ -133,16 +139,12 @@ function dispatch(el) {
   if (d.buy !== undefined) return handlers.buy(d.buy);
   if (d.opt !== undefined) return handlers.opt(d.opt);
   if (d.speed !== undefined) return handlers.speed(d.speed);
+  if (d.tab !== undefined) return handlers.tab(d.tab);
+  if (d.focus !== undefined) return handlers.focus(d.focus);
   if (d.settings !== undefined) return handlers.settings();
   if (d.retire !== undefined) return handlers.retire();
   if (d.delete !== undefined) return handlers.delete();
-  if (d.close !== undefined) { closeModal(el); return handlers.close(); }
-}
-
-/** 点掉弹窗里的「关闭」后，把那个弹窗整块移除 */
-function closeModal(el) {
-  const box = el.closest ? el.closest('.modal') : null;
-  if (box && box.parentNode) box.parentNode.removeChild(box);
+  if (d.close !== undefined) { closeModal(overlay); return handlers.close(); }
 }
 
 bindActions({ app: root, overlay }, dispatch);

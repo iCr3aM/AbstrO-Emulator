@@ -1,13 +1,14 @@
 /**
  * ══════════════ UI 截图检查 ══════════════
  *
- * 为什么需要它：check / play / probe 全都跑在 DOM stub 里，**看不见排版**——
+ * 为什么需要它：check / click / probe 全都跑在 DOM stub 里，**看不见排版**——
  * 「按钮换行」「文字叠在一起」「日志压住内容」这类问题只有真浏览器渲染才发现。
  * 本工具用 Playwright(Chromium) 把 dist 挂在真实部署路径 /studio/ 下，
- * 对 4 个标签页 × 手机/桌面 × 新档/晚期存档 各截一张图（共 16 张），存到 `.codebuddy/ui-shots/`。
+ * 对 手机 / 桌面 × 新档 / 末期存档 各截一张图（共 4 张），存到 `.codebuddy/ui-shots/`。
  *
- * late 模式注入一个第 8 幕的大数值存档 —— 验证「¥65049.02万亿」这种量级
- * 在 HUD / 页面里不折行、不溢出（用户要求：数字变动之后不能换行）。
+ * late 模式注入一份第 7 幕的大数值存档 —— 验证「¥2500.00万亿」这种量级
+ * 在 HUD / 榜单里不折行、不溢出（用户要求：数字变动之后不能换行）。
+ * 该档刻意停在「已上市但名次 > 20」，好把榜单底部那行钉死的玩家行也截进去。
  *
  * 用法：先 `npm run build`，再 `node tools/ui-shots.mjs`
  * （无头截图是纯布局检查——看结构，不看美术。）
@@ -19,7 +20,6 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createState, serialize, SAVE_KEY } from '../src/core/state.js';
-import { BUILDINGS, ACTS } from '../src/core/content.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
@@ -27,27 +27,18 @@ const OUT = join(ROOT, '.codebuddy', 'ui-shots');
 const PREFIX = '/studio/';                       // 与真实部署路径一致
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
 
-/** 末期存档：第 8 幕、全建筑、大数值（量级对齐真实终局：¥数万亿） */
+/**
+ * 末期存档：第 7 幕、三条线各 Lv120、已上市但名次 > 10。
+ * 市值约 1.0 万亿 USD —— 足够大（HUD 出现「万亿」），又不至于登顶（否则结局弹窗会盖住主界面）。
+ */
 function lateSaveJson() {
   const s = createState();
-  s.rngSeed = 20260809;
-  s.act = 8;
-  s.introSeen = true;
-  // ⚠️ 2026-09-26 第二批 §2.6（进度钟）：日历现在由「幕次 + 幕内市值进度」派生，
-  //    而这份档全建筑 ×6 ⇒ 市值必然远超第 8 幕门槛 ⇒ 日历自动落在第 8 幕末（2061年8月，结局），
-  //    与「第 8 幕」的语义一致。下面这行 `elapsed` 与日历无关了，留着是因为**融资到点**
-  //    仍按真实秒判定 —— 拨大它才能让截图里出现「7 轮融资已到账」等末期状态。
-  s.elapsed = ACTS.slice(1, 8).reduce((a, x) => a + x.seconds, 0);
-  for (const b of BUILDINGS) {
-    if (b.kind === 'landmark') s.buildings[b.id] = 1;
-    else s.buildings[b.id] = 6;
-  }
-  s.resources.money = 2.5e15;
-  s.resources.rep = 2500;
-  s.peakMarketCap = 6.5e13;
-  // ⚠️ 2026-09-26 第三批：传承 / LP 已随减法整块删除，存档里不再有该字段 —— 不再写入。
-  s.log.push('第 8 幕 · 交接与退休 —— 办公室安静下来，只剩三个人。');
-  s.log.push('【里程碑】市值突破 1 万亿');
+  s.stage = 7;
+  s.lines = { r: 120, m: 120, h: 120 };
+  s.money = 2.5e15;
+  s.finance = { rounds: ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'] };
+  s.log.push('【登顶】不要走到这里 —— 这份档停在名次 10 名之外。');
+  s.log.push('【IPO】到账 1.23万亿（公开发行）');
   s.log.push('（回忆）对面那栋楼挂上了寒武纪的牌子。');
   return serialize(s);
 }
@@ -72,6 +63,12 @@ const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
 ];
 
+/** 两个页签各截一张 —— 只截一个页签等于另一页的排版从来没被看过 */
+const TABS = [
+  { name: 'co', label: '公司', idx: 0 },
+  { name: 'rank', label: '市值榜', idx: 1 },
+];
+
 let fails = 0;
 for (const vp of VIEWPORTS) {
   for (const era of ['fresh', 'late']) {
@@ -80,7 +77,7 @@ for (const vp of VIEWPORTS) {
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
 
-    // late 模式：**应用启动前**注入第 8 幕大数值存档。
+    // late 模式：**应用启动前**注入末期存档。
     // ⚠️ 不能 goto 之后再用 localStorage.setItem + reload —— reload 会触发
     //    beforeunload 自动存盘，把注入的档**覆盖回新档**（和删档是同一个坑）。
     if (era === 'late') {
@@ -89,49 +86,98 @@ for (const vp of VIEWPORTS) {
     }
 
     await page.goto(base);
-    // 首访会弹开场介绍 —— 点「开工」进主界面
-    const intro = page.locator('[data-intro]');
-    if (await intro.count()) await intro.click();
+    await page.waitForTimeout(400);                 // 等 draw() 至少跑两帧（150ms 全量重建）
+    /**
+     * 末期档会在开跑后自己爬到 #1 并弹出「登顶」结局弹窗（真实行为），
+     * 那层 `rgba(0,0,0,.6)` 遮罩会把整页压暗、排版看不清。
+     * ⚠️ 不能只点一次 —— 弹窗不是开局就在的（公司爬到第一才弹），
+     *    而且可能正好在「点掉上一张」之后才冒出来。所以点到遮罩真的没了为止。
+     */
+    const dismissModal = async () => {
+      for (let i = 0; i < 6; i++) {
+        const shown = await page.evaluate(() => {
+          const ov = document.querySelector('#overlay');
+          if (!ov || getComputedStyle(ov).display === 'none') return false;
+          const el = ov.querySelector('[data-close]');
+          if (el) el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+          return true;
+        });
+        if (!shown) return;
+        await page.waitForTimeout(200);
+      }
+    };
 
-    for (let tab = 0; tab < 4; tab++) {   // 2026-09-24 新增「世界」tab：4 个标签页
-      await page.click(`[data-tab="${tab}"]`);
-      await page.waitForTimeout(250);                  // 等 draw() 至少跑两帧（150ms 全量重建）
-      const file = join(OUT, `${vp.name}-${era}-tab${tab}.png`);
-      // fullPage：截整页而不是只截视口 —— 手机上长页面底部的重叠问题（日志条压内容）只有全页截图才看得见（2026-09-24 用户要求「截完整」）
-  await page.screenshot({ path: file, fullPage: true });
-      console.log(`  📸 ${vp.name}/${era} tab${tab} → ${file}`);
+    for (const tb of TABS) {
+      // ⚠️ 不能用 `page.click()`：本页每 150ms 整页重建一次，元素随时可能被换掉。
+      //    直接派发 `pointerdown`（`bind.js` 的 `PRIMARY_EVENT`）最稳。
+      await page.evaluate(i => {
+        const el = document.querySelector(`[data-tab="${i}"]`);
+        if (el) el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+      }, tb.idx);
+      await page.waitForTimeout(250);
+      await dismissModal();                        // 遮罩不许进截图（见上面的说明）
+
+      const file = join(OUT, `${vp.name}-${era}-${tb.name}.png`);
+      // fullPage：截整页而不是只截视口 —— 手机上长页面底部的重叠问题（日志条压内容）只有全页截图才看得见
+      await page.screenshot({ path: file, fullPage: true });
+      console.log(`  📸 ${vp.name}/${era}/${tb.label} → ${file}`);
+
+      // 一行显示检查（语义分两级）：
+      //   **失败** = 横向溢出（scrollWidth > clientWidth —— 真的装不下）
+      //   **警告** = 按钮/单元格纵向折行（「应该一行」的东西换行了，人工看截图定夺）
+      const layout = await page.evaluate(() => {
+        const wrap = [];
+        const horiz = [];
+        for (const el of document.querySelectorAll('.tag, .row button, .hud .cell, .cost, .ic, .tab')) {
+          const cs = getComputedStyle(el);
+          const contentH = el.clientHeight
+            - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+            - parseFloat(cs.borderTopWidth) - parseFloat(cs.borderBottomWidth);
+          const lines = contentH / parseFloat(cs.lineHeight || cs.fontSize);
+          if (lines > 1.7 && el.textContent.trim()) {
+            wrap.push(`${el.className || el.tagName}「${el.textContent.trim().slice(0, 24)}…」≈${lines.toFixed(1)} 行`);
+          }
+          if (el.scrollWidth > el.clientWidth + 1) {
+            horiz.push(`${el.className || el.tagName}「${el.textContent.trim().slice(0, 24)}…」`);
+          }
+        }
+        for (const el of document.querySelectorAll('.row, .head, .foot, .hud, .rank-head, .tabs')) {
+          if (el.scrollWidth > el.clientWidth + 1) {
+            const kids = [...el.children].map(k => `${(k.className || k.tagName).toString().slice(0, 20)}:w${Math.round(k.getBoundingClientRect().width)}:sw${k.scrollWidth}`).join(' | ');
+            horiz.push(`${el.className}（横向溢出）「${el.textContent.trim().slice(0, 24)}」${kids}`);
+          }
+        }
+        const on = document.querySelector('.tab.on');
+        const ov = document.querySelector('#overlay');
+        return {
+          wrap, horiz,
+          hasRank: !!document.querySelector('.rank'),
+          hasLines: !!document.querySelector('.lines'),
+          hasLog: !!document.querySelector('.log'),
+          tabOn: on ? on.textContent.trim() : '—',
+          hasMe: !!document.querySelector('.row.me'),
+          // 真浏览器里量遮罩：`closeModal` 之后 `#overlay:empty` 必须成立、`display` 必须回到 none。
+          // 「关掉弹窗还在 / 还吃掉全页点击」那个 bug 只有这一条能在真实 CSS 下抓住。
+          overlayShown: !!ov && getComputedStyle(ov).display !== 'none',
+        };
+      });
+      for (const o of layout.wrap) console.log(`  ⚠️ 纵向折行（人工确认）：${o}`);
+      for (const o of layout.horiz) { console.log(`  ❌ 横向溢出：${o}`); fails++; }
+      // 结构自检：日志条跨页签常驻；两页内容互斥（公司页有投资线无榜单，市值榜页反过来）
+      if (!layout.hasLog) { console.log('  ❌ 主界面里没有日志条'); fails++; }
+      if (layout.overlayShown) { console.log('  ❌ 弹窗关闭后遮罩层还在（#overlay:empty 不成立）'); fails++; }
+      if (layout.tabOn !== tb.label) { console.log(`  ❌ 页签高亮不对：「${tb.label}」页亮的是「${layout.tabOn}」`); fails++; }
+      if (tb.idx === 0 && (!layout.hasLines || layout.hasRank)) {
+        console.log('  ❌ 「公司」页结构不对（应只有投资线，没有榜单）'); fails++;
+      }
+      if (tb.idx === 1 && (!layout.hasRank || layout.hasLines)) {
+        console.log('  ❌ 「市值榜」页结构不对（应只有榜单，没有投资线）'); fails++;
+      }
+      if (era === 'late' && tb.idx === 1 && !layout.hasMe) {
+        console.log('  ❌ 末期档（已上市）榜单里没有玩家行'); fails++;
+      }
     }
 
-    // 一行显示检查（语义分两级）：
-    //   **失败** = 横向溢出（scrollWidth > clientWidth —— 真的装不下）
-    //   **警告** = .tag / 按钮纵向折行（「应该一行」的东西换行了，人工看截图定夺）
-    //   .foot / 说明段落**允许**多行（它们本来就是段落），不检查
-    const layout = await page.evaluate(() => {
-      const wrap = [];
-      const horiz = [];
-      for (const el of document.querySelectorAll('.tag, .row button, .hud .cell')) {
-        const cs = getComputedStyle(el);
-        const contentH = el.clientHeight
-          - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
-          - parseFloat(cs.borderTopWidth) - parseFloat(cs.borderBottomWidth);
-        const lines = contentH / parseFloat(cs.lineHeight || cs.fontSize);
-        if (lines > 1.7 && el.textContent.trim()) {
-          wrap.push(`${el.className || el.tagName}「${el.textContent.trim().slice(0, 24)}…」≈${lines.toFixed(1)} 行`);
-        }
-        if (el.scrollWidth > el.clientWidth + 1) {
-          horiz.push(`${el.className || el.tagName}「${el.textContent.trim().slice(0, 24)}…」`);
-        }
-      }
-      for (const el of document.querySelectorAll('.row, .head, .foot, .nar, .hud')) {
-        if (el.scrollWidth > el.clientWidth + 1) {
-          const kids = [...el.children].map(k => `${(k.className || k.tagName).toString().slice(0, 20)}:w${Math.round(k.getBoundingClientRect().width)}:sw${k.scrollWidth}`).join(' | ');
-          horiz.push(`${el.className}（横向溢出）「${el.textContent.trim().slice(0, 24)}」${kids}`);
-        }
-      }
-      return { wrap, horiz };
-    });
-    for (const o of layout.wrap) console.log(`  ⚠️ 纵向折行（人工确认）：${o}`);
-    for (const o of layout.horiz) { console.log(`  ❌ 横向溢出：${o}`); fails++; }
     if (errors.length) { console.log(`  ❌ 页面 JS 错误：${errors.join(' | ')}`); fails++; }
     await ctx.close();
   }

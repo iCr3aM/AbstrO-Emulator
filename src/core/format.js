@@ -11,7 +11,7 @@
 //    幕的年份区间（`ACTS[].years`）重新成为日历的真相源 ⇒ 本文件重新 import `ACTS`。
 //    `SEC_PER_YEAR` 不再参与日历推导（它降级为「一局多长」的标定参考，见 content.js），
 //    所以这里也不再 import 它。
-import { ACTS } from './content.js';
+import { ACTS, START_MCAP } from './content.js';
 
 const UNITS = [
   { v: 1e12, s: '万亿' },
@@ -70,6 +70,13 @@ export function fmtShort(n) {
  *
  * `s.elapsed` **仍然存在、仍然累加真实秒**（离线结算 / 融资到点 / 日志锚定靠它），
  * 但它不再驱动日历与世界榜；日历的缓存字段是 `s.calMonth`（`engine.tick` 每帧写入）。
+ *
+ *    ⑤ 第五版（v4 重制 · 本版）：字段名对齐 `s.stage`（v4 的幕次字段叫 `stage`，不叫 `act`），
+ *      并把「幕内插值」换成**全局锚点插值** —— 因为前者在幕边界会**倒退**：
+ *      跨幕那一瞬市值 ≈ `mcap[j-1]`，而 `p = 市值 / mcap[j]` 立刻掉到 `1/比值`（本版阶梯上 1/5 ~ 1/1200）
+ *      ⇒ 每跨一幕日历往回跳两三年。改成「对数市值轴上的全局分段线性」后：
+ *      锚点 `(START_MCAP → 0 月)`、`(ACTS[j].mcap → 60j 月)`，市值单调 ⇒ 月份单调，绝不倒退。
+ *      玩法语义**不变**：玩得快时间走得快；卡在某一幕时，时间与世界一起冻结。
  */
 const START_UTC = Date.UTC(2026, 7, 9);              // 2026-08-09
 const MS_PER_YEAR = 365.25 * 24 * 3600 * 1000;
@@ -88,15 +95,28 @@ export const ACT_MONTHS = ACTS.map(a => {
 });
 
 /**
- * 本幕的**幕内市值进度 p**（0–1）对应的日历月数。
- * @param s 只要 `s.act`
+ * 进度钟锚点：`[市值, 月数]`。第 0 个是「开局市值 → 0 月」，第 j 个是 `(mcap[j] → 60j 月)`。
+ * 门槛阶梯由标定器保证**严格递增**（见 content.js 顶部说明），所以这条链天然单调。
+ */
+const CLOCK = [[START_MCAP, 0], ...ACTS.slice(1).map((a, i) => [a.mcap, (i + 1) * 60])];
+
+/**
+ * 当前市值对应的**日历月数** —— 对数市值轴上的分段线性插值（单调 ⇒ 日期只前进不后退）。
+ * @param s 只用 `s.calMonth` 的容器身份（本函数的输出**要写回** `s.calMonth`，见 `engine.tick`）
  * @param D `derived(s)` 的结果（只要 `marketCap`）—— 由调用方算，避免 format → economy 的环。
  */
 export function calMonthOf(s, D) {
-  const a = ACTS[s.act] || ACTS[1];
-  const span = ACT_MONTHS[s.act] || ACT_MONTHS[1];
-  const p = Math.max(0, Math.min(1, ((D && D.marketCap) || 0) / a.mcap));
-  return span[0] + p * (span[1] - span[0]);
+  const cap = Math.max(CLOCK[0][0], (D && D.marketCap) || 0);
+  const x = Math.log(cap);
+  for (let i = 1; i < CLOCK.length; i++) {
+    const [c0, m0] = CLOCK[i - 1];
+    const [c1, m1] = CLOCK[i];
+    if (cap > c1 && i < CLOCK.length - 1) continue;
+    const span = Math.log(c1) - Math.log(c0);
+    const p = span > 0 ? Math.max(0, Math.min(1, (x - Math.log(c0)) / span)) : 1;
+    return m0 + p * (m1 - m0);
+  }
+  return MONTHS_TOTAL;
 }
 
 /**

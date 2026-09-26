@@ -1,16 +1,21 @@
 /**
  * 样式（重制版 v4）
  * ===============================================================
- * 原则（LESS IS MORE）：**只有一块屏** —— 页头 / HUD / 三条线 / 待决 / 世界榜 / 流水。
+ * 原则（LESS IS MORE）：**只有一块屏** —— 固定页头 / HUD / 页签 / 正文 / 固定日志条。
  * 配色基调由 `--accent` 一个变量驱动，`render.js` 按阶段写它。
  * 所有尺寸用相对单位，手机上不出现横向溢出。
+ *
+ * 排版节奏：纵向间距只有 8 与 12 两档 —— 8 是块内（同一张卡里的行距），
+ * 12 是块间。不再出现 6 / 10 这类中间值，纵向呼吸才是均匀的。
  */
 
 :root {
   --bg: #0d0f12;
   --panel: #151a20;
   --fg: #dfe6ee;
-  --mut: #7c8794;
+  /* 次要文字：压在 --panel 上约 6.1:1（原 #7c8794 是 4.8:1）——
+     11–12px 的小字在手机上原来看得吃力 */
+  --mut: #8f9aa6;
   --line: #232b34;
   --accent: #6ad1c0;
   --ok: #7bc47f;
@@ -18,7 +23,8 @@
   --gold: #c9b458;
 }
 
-* { box-sizing: border-box; }
+/* 直角：本版**一律不用圆角**（用户 2026-09-26 明确要求）。只在这一处声明，各处不再写 border-radius。 */
+* { box-sizing: border-box; border-radius: 0; }
 
 html, body {
   margin: 0;
@@ -29,82 +35,111 @@ html, body {
   -webkit-text-size-adjust: 100%;
 }
 
+/* 底部留白必须盖过固定日志条（.log 是 fixed，见下方说明），否则最后一行内容被压住 */
 #app {
   max-width: 620px;
   margin: 0 auto;
-  padding: 12px 12px 84px;
+  padding: 0 12px calc(148px + env(safe-area-inset-bottom, 0px));
 }
 
-/* ── 页头 ── */
+/* ── 页头（固定）——倍速 / 退休 / 设置都在这里 ── */
 .head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
-  align-items: baseline;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
-  padding: 4px 2px 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  background: rgba(13, 15, 18, .94);
 }
 .head .brand { font-size: 16px; font-weight: 600; color: var(--accent); }
 .head .date { font-size: 12px; color: var(--mut); }
-.head .tools { margin-left: auto; }
+.head .tools { margin-left: auto; display: flex; gap: 8px; }
 
 .ic {
   background: none;
   border: 1px solid var(--line);
-  border-radius: 6px;
   color: var(--fg);
-  padding: 3px 8px;
+  padding: 4px 10px;
+  font: inherit;
   font-size: 12px;
   cursor: pointer;
 }
 .ic:active { background: var(--line); }
+/* 当前倍增档位 / 任何被选中的开关：描边与文字都换成主色 */
+.ic.on { border-color: var(--accent); color: var(--accent); }
 
-/* ── HUD ── */
+/* ── HUD（跨页签常驻）── */
 .hud {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-  margin-bottom: 10px;
+  padding-top: 12px;
+  margin-bottom: 12px;
 }
 .hud .cell {
   display: block;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 7px 10px;
+  padding: 8px 12px;
 }
 .hud .cell i { display: block; font-style: normal; font-size: 11px; color: var(--mut); }
 .hud .cell b { display: block; font-size: 15px; font-weight: 600; word-break: break-all; }
 .hud .cell u { display: block; text-decoration: none; font-size: 11px; color: var(--mut); }
+/* 目标里的 ✓/· —— 与正文同字号但不抢词 */
+.hud .cell b em { font-style: normal; color: var(--mut); }
+.hud .cell b em.ok { color: var(--ok); }
+/* 一格装两栏（左净利率 · 右世界排名）：两个 half 并排，各自内部照旧 i/b/u 竖排 */
+.hud .cell .half { display: inline-block; vertical-align: top; width: 48%; }
+.hud .cell .half + .half { text-align: right; }
 
-/* ── 阶段目标 ── */
-.goal {
-  font-size: 12px;
-  color: var(--mut);
-  padding: 0 2px 8px;
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  flex-wrap: wrap;
+/* ── 定格（登顶之后：时间冻结，只剩回看）── */
+.frozen {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 13px;
+  text-align: center;
 }
-.goal b.ok { color: var(--ok); }
-.goal .mut { margin-left: auto; }
+
+/* ── 页签 ── */
+.tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+.tab {
+  flex: 1;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--mut);
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab.on { color: var(--accent); border-color: var(--accent); }
+
+/* ── 自动购买方向（公司页最上面一行）── */
+.focus { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.focus .fk { font-size: 11px; color: var(--mut); }
 
 /* ── 三条投资线 ── */
-.lines { display: grid; gap: 6px; margin-bottom: 10px; }
+.lines { display: grid; gap: 8px; margin-bottom: 12px; }
 .line {
   display: grid;
-  grid-template-columns: auto 52px 1fr auto;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 8px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 7px 10px;
+  padding: 8px 12px;
 }
 .line .btn {
   background: var(--accent);
   border: 0;
-  border-radius: 6px;
   color: #07201c;
+  font: inherit;
   font-weight: 600;
   font-size: 13px;
   padding: 7px 12px;
@@ -112,7 +147,9 @@ html, body {
 }
 .line .btn em { font-style: normal; font-weight: 400; opacity: .6; font-size: 11px; margin-left: 5px; }
 .line .btn.dim { background: var(--line); color: var(--mut); }
-.line .lv { font-size: 12px; color: var(--mut); }
+.line .btn:disabled,
+.opt:disabled,
+.ic:disabled { opacity: .45; cursor: default; }
 .line .val { font-size: 13px; }
 .line .cost { font-size: 12px; color: var(--mut); }
 
@@ -120,47 +157,47 @@ html, body {
 .pending {
   background: var(--panel);
   border: 1px solid var(--gold);
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
 }
 .pending .p-head { font-size: 11px; color: var(--gold); }
 .pending .p-head b { font-size: 14px; }
 .pending .p-title { font-weight: 600; margin: 4px 0 2px; }
 .pending .p-body { font-size: 13px; color: var(--mut); }
-.pending .p-opts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.pending .p-opts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .opt {
   background: none;
   border: 1px solid var(--accent);
-  border-radius: 6px;
   color: var(--accent);
   padding: 6px 10px;
+  font: inherit;
   font-size: 13px;
   cursor: pointer;
 }
 .opt:active { background: rgba(255, 255, 255, .06); }
 .opt.danger { border-color: var(--bad); color: var(--bad); }
+/* 选项上的效果数字：文案讲故事，数字讲代价 —— 一个字比一个字号小、比一个颜色淡 */
+.opt .eff { font-style: normal; font-size: 11px; color: var(--mut); margin-left: 6px; }
 
 /* ── 世界市值榜 ── */
 .rank {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 10px 6px;
-  margin-bottom: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
 }
 .rank-head {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
   color: var(--mut);
-  padding-bottom: 6px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 4px;
 }
 .rank .row {
   display: grid;
-  grid-template-columns: 26px 1fr 44px auto;
+  grid-template-columns: 34px 1fr 44px auto;
   gap: 8px;
   align-items: baseline;
   padding: 3px 0;
@@ -176,34 +213,26 @@ html, body {
 .rank .row.me { color: var(--accent); font-weight: 600; }
 .rank .sep { text-align: center; color: var(--mut); font-size: 11px; padding: 2px 0; }
 
-/* ── 流水 ── */
+/* ── 流水（固定底栏，内部滚动 —— 与旧版一致）── */
+/* ⚠️ 高度必须与 `#app` 的 padding-bottom 对得上，否则最后一行正文被压住。 */
 .log {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 10px;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  max-width: 620px;
+  margin: 0 auto;
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+  background: rgba(13, 15, 18, .97);
+  border-top: 1px solid var(--line);
   font-size: 12px;
   color: var(--mut);
 }
 .log .li { padding: 2px 0; border-bottom: 1px solid rgba(255, 255, 255, .03); }
 .log .li:last-child { border-bottom: 0; }
-
-/* ── 底栏 ── */
-.foot {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
-  background: rgba(13, 15, 18, .94);
-  border-top: 1px solid var(--line);
-  max-width: 620px;
-  margin: 0 auto;
-}
-.foot .grow { flex: 1; }
 
 /* ── 弹窗层 ── */
 #overlay:empty { display: none; }
@@ -220,7 +249,6 @@ html, body {
 .modal {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
   padding: 14px;
   width: 100%;
   max-width: 420px;

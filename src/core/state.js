@@ -7,7 +7,7 @@
  * 所以永远不会有「存档里的加成和资源对不上」这类 bug。
  */
 
-import { ACTS, OPENING, LINES } from './content.js';
+import { ACTS, OPENING, LINES, FOCUS, FOCUS_EVEN } from './content.js';
 
 /**
  * ⚠️ 版本号从 18 直接跳到 19：v4 是**重制**，字段含义全变了
@@ -50,6 +50,12 @@ export function createState() {
     uidSeq: 0,
     /** 积压超限被按默认选项结算的条数（年度报告里报一行） */
     overflowed: 0,
+    /**
+     * 第 `AUTO_DECIDE_STAGE` 幕起因「后期自动化」直接按默认选项结算的年数（§1.5）。
+     * 它与 `decisions + pending + overflowed` 相加**必须等于已过的年数** —— 这条恒等式
+     * 是「每年恰好一条待决」的机器判据（见 `tools/probes.mjs`）。
+     */
+    autoDecided: 0,
     /** 已经抽到过的事件 id，尽量不重复 */
     seen: [],
     decisions: 0,
@@ -58,7 +64,8 @@ export function createState() {
 
     // ── 世界市值榜（惰性初始化：第一次 tick 才建 100 家的表）──
     world: null,
-    worldSeed: 20260924,
+    /** 世界种子：`world.js` 用它决定「抽到哪几家黑马」（字段名与 `world.js` 的读取一致） */
+    rngSeed: 20260924,
     worldCap: null,
     worldPrevCap: null,
     worldRank: null,
@@ -70,6 +77,8 @@ export function createState() {
 
     // ── 设置 ──
     speed: 1,
+    /** 自动购买的方向（`FOCUS[].id`；默认 `even` = 永远买等级最低的那条） */
+    focus: FOCUS_EVEN,
 
     /** 结局：`'top'` = 唯一结局「登顶」，否则 null（游戏继续） */
     ending: null,
@@ -104,6 +113,8 @@ export function deserialize(raw) {
   // 三条线等级只增不减 —— 夹到合法区间，防手改存档
   for (const l of LINES) merged.lines[l.id] = Math.max(0, Math.floor(merged.lines[l.id] || 0));
   merged.stage = Math.max(1, Math.min(ACTS.length - 1, merged.stage | 0));
+  // 方向必须是合法选项：手改存档写进来的野字符串会让 `nextLine` 去查一个不存在的线
+  merged.focus = FOCUS.some(f => f.id === merged.focus) ? merged.focus : FOCUS_EVEN;
   merged.version = SAVE_VERSION;
   return merged;
 }

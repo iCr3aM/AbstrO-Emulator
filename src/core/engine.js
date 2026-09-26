@@ -13,11 +13,12 @@
  */
 
 import {
-  ACTS, LINES, PENDING_CAP, IPO_LINE,
+  ACTS, LINES, PENDING_CAP, AUTO_BUY_RESERVE, MANUAL_GAIN,
+  AUTO_DECIDE_STAGE, FOCUS, FOCUS_EVEN, FOCUS_LAG,
   eventsFor, eventById, companyName,
 } from './content.js';
 import { rates, derived, purchase, lowestLine, costFor, lineLevel } from './economy.js';
-import { financeTick } from './finance.js';
+import { financeTick, isListed } from './finance.js';
 import { worldTick } from './world.js';
 import { calMonthOf, gameYear, gameMonths } from './format.js';
 
@@ -41,20 +42,61 @@ export function applyEffect(s, eff, R) {
   if (eff.pe) s.mod.pe += eff.pe;
 }
 
-// ─────────────────────────── 自动购买（§1.6）───────────────────────────
+// ─────────────────────────── 自动购买与手动购买（§1.6）───────────────────────────
 /**
- * 每 tick 买「当前等级最低」的那条线 —— 这是游戏**真正的引擎**，玩家不在它也一直转。
- * 三条线共用 `cost(n)` ⇒ 等级最低 = 最便宜 ⇒ 均衡自动维持，不用玩家自己算。
+ * 这一 tick 自动该买哪条线（GDD §1.6 的「方向」）：
+ *   · `even`（默认）= 等级最低的那条 —— 均衡，与旧版完全一致；
+ *   · 某条线 id   = 优先它，但**失衡会自动回补**：它一旦比最低线高出 `FOCUS_LAG` 级，
+ *                  这一 tick 就改买最低线。
+ * 为什么要回补：三条线共用 `cost(n)`，偏科会让后续购买按 `(r/g)^L = 1.085^L` 变慢，
+ * 方向只能"偏一点"，偏死就拖垮整局 —— 所以方向是**取舍**（更快点亮本幕目标 vs 整体略慢），
+ * 不是一个「选了就更快」的按钮。
+ */
+function nextLine(s) {
+  const low = lowestLine(s);
+  const focus = s.focus || FOCUS_EVEN;
+  if (focus === FOCUS_EVEN) return low;
+  return lineLevel(s, focus) - lineLevel(s, low) >= FOCUS_LAG ? low : focus;
+}
+
+/**
+ * 每 tick 买一条线 —— 这是游戏**真正的引擎**，玩家不在它也一直转。
+ * 三条线共用 `cost(n)` ⇒ 均衡时「等级最低 = 最便宜」，自动维持。
+ *
+ * 门槛是 `AUTO_BUY_RESERVE × cost` 而不是 `cost`：自动要留一份储备才动手，
+ * 于是**每个购买周期里有半段时间钱是够手动买的**（`AUTO_BUY_RESERVE = 2`）。
+ * 没有这个储备，钱会在同一个 tick 里被买光，手动按钮永远点不动。
  */
 function autoBuy(s) {
   let n = 0;
-  let id = lowestLine(s);
-  while (n < AUTO_BUY_MAX && s.money >= costFor(s, id)) {
+  let id = nextLine(s);
+  while (n < AUTO_BUY_MAX && s.money >= AUTO_BUY_RESERVE * costFor(s, id)) {
     purchase(s, id);
-    id = lowestLine(s);
+    id = nextLine(s);
     n += 1;
   }
   if (n > 0) logPurchases(s);
+}
+
+/**
+ * 设定自动购买的方向（GDD §1.6）。玩家的动作一共只有三个：点一条投资线、
+ * 结算一条待决、改一次方向 —— 这就是「玩家做大方向决策」里那个**方向**。
+ * @returns {boolean} 是否是合法方向
+ */
+export function setFocus(s, id) {
+  if (!FOCUS.some(f => f.id === id)) return false;
+  s.focus = id;
+  return true;
+}
+
+/**
+ * 手动购买 —— **唯一入口**（按钮与无头工具都走这里）。
+ * 与 `autoBuy` 共用同一个 `purchase()`，差别只有两点：**由玩家指定哪条线**、
+ * **一次 `MANUAL_GAIN` 级**。这就是「自动是打折版、手动是满配」。
+ * @returns {boolean} 是否买成
+ */
+export function manualBuy(s, id) {
+  return purchase(s, id, MANUAL_GAIN);
 }
 
 /**
@@ -146,26 +188,42 @@ function annualReport(s, R, D) {
   s.lastYear = y;
 
   const ev = drawEvent(s);
-  let spilled = 0;
-  if (ev) {
-    s.pending.push({ uid: ++s.uidSeq, id: ev.id });
-    // 积压上限：第 4 条起按默认选项自动结算（在线、离线同一条规则）
-    if (s.pending.length > PENDING_CAP) spilled = resolveByDefault(s, s.pending.length - PENDING_CAP, R);
+  if (!ev) { s.log.push(`【第 ${y} 年】无待决`); return; }
+
+  /**
+   * 第 `AUTO_DECIDE_STAGE` 幕起**不再交给玩家**（GDD §1.5「前期玩家操作、后期自动化」）：
+   * 那时公司已经大到三个人管不过来，年度事件由团队按**保守项**自行处理，不进待决队列。
+   * 玩家剩下的动作只有自动购买的方向（§1.6）。
+   */
+  if (s.stage >= AUTO_DECIDE_STAGE) {
+    const opt = ev.options[ev.default];
+    applyEffect(s, opt.eff, R);
+    s.autoDecided += 1;
+    s.log.push(`【第 ${y} 年】${ev.title} → ${opt.text}`);
+    return;
   }
+
+  s.pending.push({ uid: ++s.uidSeq, id: ev.id });
+  // 积压上限：第 4 条起按默认选项自动结算（在线、离线同一条规则）
+  const spilled = s.pending.length > PENDING_CAP ? resolveByDefault(s, s.pending.length - PENDING_CAP, R) : 0;
   s.log.push(`【第 ${y} 年】${s.pending.length ? `待决 ${s.pending.length} 条` : '无待决'}`
     + (spilled ? ` · 另有 ${spilled} 条已按默认处理` : ''));
 }
 
 // ─────────────────────────── 推幕与目标 ───────────────────────────
-/** 阶段目标是否达成（**只用于年度报告里打勾**，不额外加闸） */
+/**
+ * 阶段目标是否达成（**只用于 HUD 打勾**，不额外加闸）。
+ * 七条与 `ACTS[].goal` 的文案一一对应，阈值全部实测反推 ⇒ **每条都在本幕之内被跨过**
+ * （推演与理由见 `content.js` 的 `ACTS` 注释）。
+ */
 export function stageGoalMet(s, R, D) {
   switch (s.stage) {
-    case 1: return R.prod >= 3.0;
-    case 2: return R.net > 0;
-    case 3: return D.sharePct >= 15;
+    case 1: return R.prod >= 1.05;
+    case 2: return R.team >= 1.25;
+    case 3: return D.sharePct >= 35;
     case 4: return (s.finance.rounds || []).includes('a');
-    case 5: return D.marketCap >= IPO_LINE;
-    case 6: return (s.worldRank ?? 999) <= 10;
+    case 5: return R.revenue >= 5e7;
+    case 6: return R.revenue >= 5e9;
     case 7: return s.worldRank === 1;
     default: return false;
   }
@@ -188,6 +246,12 @@ function advanceStage(s, D) {
  * @param {number} dtReal 本步的**真实**秒（倍速在内部放大；`s.elapsed` 只记真实秒）
  */
 export function tick(s, dtReal = 0.1) {
+  /**
+   * 登顶之后**定格**（GDD §1.7）：时间冻结，生产 / 购买 / 日历 / 融资 / 世界榜全部暂停，
+   * 玩家只剩回看。放在最前面 —— 只有这一个出口才可能把「暂停」漏掉半件事。
+   */
+  if (s.ending) return { R: rates(s), D: derived(s) };
+
   const dt = dtReal * (s.speed || 1);
 
   // ① 生产
@@ -216,7 +280,7 @@ export function tick(s, dtReal = 0.1) {
   // 登顶 = 唯一结局的判据（`worldRank` 由 world.js 维护，这里不另算一遍）
   if (!s.ending && s.worldRank === 1) {
     s.ending = 'top';
-    s.log.push(`【登顶】${companyName(s.stage)} 成了世界第一。上面没有人了。`);
+    s.log.push(`【登顶】${companyName(isListed(s))} 成了世界第一。上面没有人了。`);
   }
 
   if (s.log.length > LOG_MAX) s.log.splice(0, s.log.length - LOG_MAX);

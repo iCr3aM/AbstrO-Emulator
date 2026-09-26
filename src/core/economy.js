@@ -72,8 +72,26 @@ export const peOf = s => {
   return Math.max(PE_MIN, Math.min(PE_MAX, base));
 };
 
-/** 「显示份额」：把无界的 `share` 映射到 0–100%，供界面与阶段 3 的目标显示 */
-export const sharePctOf = share => 100 * (1 - 1 / Math.max(1, share));
+/**
+ * 本幕市场的年营收参照（元/年）= 本幕门槛市值 ÷ 本幕 PE。
+ * 它是「你所在的那个市场有多大」的尺子：一条与 `ACTS[].mcap` 同步长大的分母，
+ * 所以份额不会像世界榜单那样被万亿级对手压成 0.0000%，也不会像旧的 `share` 映射
+ * 那样饱和到 99%。
+ */
+export const marketRevenueOf = stage => {
+  const a = Math.max(1, Math.min(7, stage | 0));
+  return ACTS[a].mcap / PE_BASE[a];
+};
+
+/**
+ * 「显示份额」：**以营收为分子、以「你 + 本幕市场」为分母**（GDD §1.2）。
+ * 幕内单调上升、换幕随市场放大而回落，全程封顶 50% —— 上限是算出来的：
+ * 幕末你的年营收恰好等于本幕市场年营收 ⇒ 100·R/(R+R) = 50%。
+ */
+export const sharePctOf = (revenue, stage) => {
+  const m = marketRevenueOf(stage);
+  return 100 * revenue / (revenue + m);
+};
 
 /**
  * 派生展示值（**不入存档**）。
@@ -81,19 +99,24 @@ export const sharePctOf = share => 100 * (1 - 1 / Math.max(1, share));
  */
 export function derived(s, R = rates(s)) {
   const pe = peOf(s);
-  return { ...R, pe, marketCap: R.revenue * pe, sharePct: sharePctOf(R.share) };
+  return {
+    ...R, pe, marketCap: R.revenue * pe,
+    marketRevenue: marketRevenueOf(s.stage),
+    sharePct: sharePctOf(R.revenue, s.stage),
+  };
 }
 
 /**
  * 买一条线。**手动点击与自动购买走的是同一个函数**（GDD §1.6）——
- * 手动点击只是把购买顺序微调得更好一点，加速上限 ≲1.15×。
+ * 唯一的差别是 `gain`：自动一次一级，手动一次 `MANUAL_GAIN` 级。
+ * @param {number} [gain=1] 这一次买几级
  * @returns {boolean} 是否买成
  */
-export function purchase(s, id) {
+export function purchase(s, id, gain = 1) {
   const c = costFor(s, id);
   if (!(s.money >= c)) return false;
   s.money -= c;
-  s.lines[id] = lineLevel(s, id) + 1;
+  s.lines[id] = lineLevel(s, id) + gain;
   return true;
 }
 
