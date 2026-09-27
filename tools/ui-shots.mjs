@@ -182,10 +182,32 @@ for (const vp of VIEWPORTS) {
             horiz.push(`${el.className}（横向溢出）「${el.textContent.trim().slice(0, 24)}」${kids}`);
           }
         }
+        /**
+         * 榜单五列**必须逐行同左同右**（用户 2026-09-27：「排版能否优化？固定位置」）。
+         * 每行都是**各自的** grid 容器 ⇒ 只要有一列写成 `auto`，列宽就跟着这一行的内容算，
+         * 于是「27.97」那一行会把环比 / 升降两列一起往左推，而「9.17」那行又推回来。
+         * 这一条只有**真浏览器**能量：DOM stub 没有布局，`npm run probe` 永远看不见。
+         */
+        const colDrift = [];
+        const rankRows = [...document.querySelectorAll('.rank .row')];
+        if (rankRows.length > 1) {
+          for (const cls of ['no', 'nm', 'dlt', 'mom', 'cap']) {
+            const boxes = rankRows.map(r => r.querySelector('.' + cls)).filter(Boolean)
+              .map(el => el.getBoundingClientRect());
+            if (!boxes.length) continue;
+            // ⚠️ 左边缘与右边缘**分开**求极差 —— 混在一个集合里算，极差必然 ≥ 列宽，永远报假红（踩过）。
+            const spread = side => Math.round(
+              Math.max(...boxes.map(b => b[side])) - Math.min(...boxes.map(b => b[side])));
+            const l = spread('left'), rt = spread('right');
+            if (l > 1 || rt > 1) {
+              colDrift.push(`.${cls} 在 ${boxes.length} 行之间错位（左差 ${l}px / 右差 ${rt}px）`);
+            }
+          }
+        }
         const on = document.querySelector('.tab.on');
         const ov = document.querySelector('#overlay');
         return {
-          wrap, horiz,
+          wrap, horiz, colDrift,
           hasRank: !!document.querySelector('.rank'),
           hasLines: !!document.querySelector('.lines'),
           hasOrders: !!document.querySelector('.orders'),
@@ -199,6 +221,7 @@ for (const vp of VIEWPORTS) {
       });
       for (const o of layout.wrap) console.log(`  ⚠️ 纵向折行（人工确认）：${o}`);
       for (const o of layout.horiz) { console.log(`  ❌ 横向溢出：${o}`); fails++; }
+      for (const o of layout.colDrift) { console.log(`  ❌ 榜单列没固定：${o}`); fails++; }
       // 结构自检：日志条跨页签常驻；两页内容互斥（公司页有投资线无榜单，市值榜页反过来）
       if (!layout.hasLog) { console.log('  ❌ 主界面里没有日志条'); fails++; }
       if (layout.overlayShown) { console.log('  ❌ 弹窗关闭后遮罩层还在（#overlay:empty 不成立）'); fails++; }

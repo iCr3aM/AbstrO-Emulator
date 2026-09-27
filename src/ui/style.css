@@ -316,10 +316,20 @@ html, body {
  * ⚠️ `text-align: left` 与 `font: inherit` 不能漏：按钮的默认样式是**居中 + 系统字体**，
  *    漏了的话公司名那一列会跟着居中，和上面的表头对不上。
  * 列：名次 / 公司 / 升降 / 环比 / 市值（用户 2026-09-27 加的环比列）。
+ *
+ * ⚠️ **五列全部定宽，一列都不许用 `auto`**（用户 2026-09-27：「排版能否优化？固定位置」）。
+ *    `auto` 是「按这一行的内容算」——而**每行都是各自的 grid 容器**，于是每行的列宽都不一样：
+ *    市值 `27.97` 那行把环比 / 升降一起往左推，`9.17` 那行又推回来。
+ *    实测（390px 手机 / 行宽 340px）：环比列的右边缘在 **308 / 323 / 331** 三个位置之间跳。
+ *    定宽依据 = **同一套字体实测出来的最长内容**（写死在注释里，改了字号要重量）：
+ *      名次 `>100` 30.0 ｜ 升降 `NEW` 27.7 ｜ 环比 `+87.3%` 42.1 ｜ 市值 `999.99` 43.8
+ *    取 34 / 36 / 46 / 46，四个数字列**全部右对齐 + 等宽数字**（`tabular-nums`），
+ *    余下的全归公司名（`1fr`，最长中文名 91px、实测 20 行里最长的英文名 78.7px，都放得下）。
+ *    市值恒两位小数（`tUsd`），所以右对齐之后**小数点自然对齐**。
  */
 .rank .row {
   display: grid;
-  grid-template-columns: 34px 1fr 36px 46px auto;
+  grid-template-columns: 34px 1fr 36px 46px 46px;
   gap: 8px;
   align-items: baseline;
   width: 100%;
@@ -333,7 +343,7 @@ html, body {
   padding: 3px 0;
 }
 .rank .row:active { background: rgba(255, 255, 255, .05); }
-.rank .row .no { color: var(--mut); font-size: 12px; }
+.rank .row .no { color: var(--mut); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .rank .row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rank .row .dlt { font-size: 11px; text-align: right; color: var(--mut); }
 /* 环比列：数字位数会变（+3.4% / −12.5%），用等宽数字让两列数字对得上 */
@@ -351,6 +361,13 @@ html, body {
  *   · 淡底 + 主色描边（**框框**），并且用负 margin 让框顶到卡片内边距上，行高不跳；
  *   · 一道 2.6 秒的呼吸阴影（**特效**），在 20 行里它是唯一会动的东西；
  *   · 底色用 `--accent-soft`（八位十六进制），所以换章换色时这一行的底色跟着一起变。
+ *
+ * ⚠️ **真 `border` + `padding` 必须配一对「负 margin + 显式 width」来补偿**（2026-09-27 加）：
+ *    1px 边框 + 6px 横向内边距会让这一行的**内容盒比别的行窄 14px**，右上角还差 1px，
+ *    于是高亮行的数字整体错位（实测：升降列右边缘 254 vs 别的行 269，差 15px）。
+ *    `margin: -7px` + `width: calc(100% + 14px)` 把边框盒外扩 14px ⇒ 内容盒回到 **25..365**，
+ *    与其它行**逐像素相同**，而框照旧比别的行宽出去 6px。
+ *    改这两个数字前先读 `node tools/ui-shots.mjs` 里那条「每列必须同左同右」的断言。
  */
 .rank .row.me {
   color: var(--accent);
@@ -358,7 +375,8 @@ html, body {
   background: var(--accent-soft);
   border: 1px solid var(--accent);
   padding: 3px 6px;
-  margin: 2px -6px;
+  margin: 2px -7px;
+  width: calc(100% + 14px);
   animation: mePulse 2.6s ease-in-out infinite;
 }
 @keyframes mePulse {
