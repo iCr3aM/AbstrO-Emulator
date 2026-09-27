@@ -62,8 +62,9 @@ function fatal(where, err) {
 let offlineNotice = null;
 try {
   const off = applyOffline(s, Date.now());
-  // 已登顶的档是**定格**的（`engine.tick` 直接返回）：离线什么也不会发生，
-  // 再弹一份「离开的这段时间」只会是一张全零的报告。
+  // 已登顶的档在这里仍是**定格**的：离线走 `offlineRun` → `tick(s, …, false)`（非实时会话，
+  // 见 `engine.tick` 的 `live` 参数）⇒ 什么也不会发生，再弹一份「离开的这段时间」只会是一张全零的报告。
+  // （登顶后的**慢放**只发生在真实会话里，与读档结算这条路无关。）
   if (off.capped > 60 && off.report && !s.ending) offlineNotice = off;
 } catch (err) {
   fatal('离线结算', err);
@@ -141,7 +142,8 @@ const handlers = {
 };
 
 let deleteReset = 0;
-let endingShown = false;
+/** 登顶那一声「叮」只许响一次（结局弹窗已经不再自动弹了，见 `draw()`） */
+let topSounded = false;
 /** 上一帧的章号 —— 推幕那一声「叮」靠它比对（`engine` 里没有 UI 可挂的钩子，在这里比最省） */
 let lastStage = s.stage;
 
@@ -151,11 +153,17 @@ function draw() {
     lastStage = s.stage;
     play('stage', s.sfx);
   }
-  if (s.ending === 'top' && !endingShown) {
-    endingShown = true;
+  /**
+   * 登顶：**只响一声、只落一次盘，不弹结局**（用户 2026-09-28）。
+   *
+   * 结局弹窗改由那条「退休」横条打开（`handlers.retire`）。为什么必须收回这个自动弹窗：
+   * 登顶之后时间只是**慢放**（`content.SAVOR_RATE`，现实 2 秒 = 游戏 1 秒），
+   * HUD 上的数字还在往上跳 —— 那正是玩家要「回味」的东西，这时候糊一张弹窗上去正好打断它。
+   */
+  if (s.ending === 'top' && !topSounded) {
+    topSounded = true;
     play('top', s.sfx);
     save(s);
-    renderEnding(overlay, s);
   }
 }
 

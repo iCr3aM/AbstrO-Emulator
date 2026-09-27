@@ -14,7 +14,7 @@
 
 import {
   ACTS, PENDING_CAP, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, MILESTONES,
-  AUTO_DECIDE_STAGE, DIL_MIN, DIL_AT,
+  AUTO_DECIDE_STAGE, DIL_MIN, DIL_AT, SAVOR_RATE,
   eventsFor, eventById, companyName,
 } from './content.js';
 import { rates, derived, purchase, lowestLine, costFor, spendableOf } from './economy.js';
@@ -170,8 +170,14 @@ function annualReport(s, R, D) {
    */
   const tag = `【${2026 + y - 1} 年】`;
 
+  /**
+   * ⚠️ 年份行**不再写「待决 N 条」/「无待决」**（用户 2026-09-28：「可以删除日志《【2026 年】
+   *    待决 1 条》的显示」）。那半句与「公司」页那张待决卡片（`render.pendingCard`）
+   *    说的是同一件事，而卡片是**当下**、永远比日志新；写在日志里只是把同一屏的同一件事说两遍。
+   *    下面两条分支因此只在**界面看不见**的时候才落一行（见各自的注释）。
+   */
   const ev = drawEvent(s);
-  if (!ev) { s.log.push(`${tag}无待决`); return; }
+  if (!ev) return;
 
   /**
    * 第 `AUTO_DECIDE_STAGE` 幕起**不再交给玩家**（GDD §1.5「前期玩家操作、后期自动化」）：
@@ -190,8 +196,12 @@ function annualReport(s, R, D) {
   s.pending.push({ uid: ++s.uidSeq, id: ev.id });
   // 积压上限：第 4 条起按默认选项自动结算（在线、离线同一条规则）
   const spilled = s.pending.length > PENDING_CAP ? resolveByDefault(s, s.pending.length - PENDING_CAP, R) : 0;
-  s.log.push(`${tag}${s.pending.length ? `待决 ${s.pending.length} 条` : '无待决'}`
-    + (spilled ? ` · 另有 ${spilled} 条已按默认处理` : ''));
+  /**
+   * ⚠️ **只在积压溢出时落一行**：`另有 N 条已按默认处理` 是**界面看不见**的事实
+   *    （被跳过的那些决策，卡片上只剩结果），不说就是静默改数。没溢出就一行都不写 ——
+   *    这一年的待决情况卡片上有，日志里再说一遍是冗余（本次修订的起因）。
+   */
+  if (spilled) s.log.push(`${tag}另有 ${spilled} 条已按默认处理`);
 }
 
 // ─────────────────────────── 推幕与目标 ───────────────────────────
@@ -285,19 +295,34 @@ export function dilate(s) {
 /**
  * @param {object} s   状态
  * @param {number} dtReal 本步的**真实**秒（倍速在内部放大；`s.elapsed` 只记真实秒）
+ * @param {boolean} live 这一步是不是**真实会话**（`createLoop` 才有资格传 true）
+ *
+ * ### 登顶之后：慢放，还是定格？（用户 2026-09-28）
+ * 登顶不再立刻定格 —— 时间是慢放到近乎停住，但 HUD 上那几个数字一直跳，直到玩家自己点「退休」。
+ * 但**只有真实会话**有资格这样跑。另外两个调用方必须继续定格：
+ *   · `offlineRun`（离线结算）—— 不然读档回来会发现数字被离线推进过；
+ *   · 无头工具（`check` / `probe` / `tune`）—— 它们没有「玩家点退休」这个终止条件，会一直跑到超时。
+ * 所以判定条件是 `s.ending && !live`，而 `live` **只有 `createLoop` 会传**（它只被 `main.js` 用）。
+ * ⚠️ 用参数而不是新增 `s.mode` 字段：状态字段会被存档，而「是不是真实会话」是**这一次运行**的
+ *    性质，不是这一局的性质 —— 存下来只会在读档后留一个撒谎的标记。
  */
-export function tick(s, dtReal = 0.1) {
+export function tick(s, dtReal = 0.1, live = false) {
   /**
-   * 登顶之后**定格**（GDD §1.7）：时间冻结，生产 / 购买 / 日历 / 融资 / 世界榜全部暂停，
-   * 玩家只剩回看。放在最前面 —— 只有这一个出口才可能把「暂停」漏掉半件事。
+   * 定格（GDD §1.7）：时间冻结，生产 / 购买 / 日历 / 融资 / 世界榜全部暂停，玩家只剩回看。
+   * 放在最前面 —— 只有这一个出口才可能把「暂停」漏掉半件事。
    */
-  if (s.ending) return { R: rates(s), D: derived(s) };
+  if (s.ending && !live) return { R: rates(s), D: derived(s) };
 
   /**
-   * 真实秒 → 游戏秒：倍速 × **决胜段减速**（`dilate` 乘在 `s.speed` 之外 ⇒ 玩家关不掉）。
+   * 真实秒 → 游戏秒：
+   *   · 回味期（登顶后的真实会话）：`SAVOR_RATE` —— **忽略 `s.speed` 与 `dilate`**，
+   *     否则玩家登顶时停在 8× 的话，回味期会变成 4×，与「特别慢」正相反；
+   *   · 正常段：倍速 × **决胜段减速**（`dilate` 乘在 `s.speed` 之外 ⇒ 玩家关不掉）。
    * `s.elapsed` 仍只记真实秒（缩放的是游戏进程，不是这局玩了多久）。
    */
-  const dt = dtReal * (s.speed || 1) * dilate(s);
+  const dt = s.ending
+    ? dtReal * SAVOR_RATE
+    : dtReal * (s.speed || 1) * dilate(s);
 
   // ① 生产
   let R = rates(s);
@@ -362,7 +387,9 @@ export function createLoop(s, onTick, onRender) {
     last = ms;
     acc += dt;
     let guard = 0;
-    while (acc >= STEP && guard++ < 60) { tick(s, STEP); acc -= STEP; }
+    // ⚠️ 第三个参数 `live = true`：**只有这里**在跑真实会话 —— 登顶之后要慢放（`SAVOR_RATE`）
+    //    而不是定格。`offlineRun` 与无头工具都直接调 `tick`（默认 false），照旧定格。
+    while (acc >= STEP && guard++ < 60) { tick(s, STEP, true); acc -= STEP; }
     if (onTick) onTick();
     if (onRender) onRender();
     raf = requestAnimationFrame(frame);

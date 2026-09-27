@@ -385,26 +385,28 @@ check('有待决时「公司」页签亮 .hot（不切过去也看得见）', sa
 check('从渲染出的 HTML 里真的点到过投资线按钮（不是空转）', sawBuy >= 1, `${sawBuy} 次`);
 check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.ending ?? 'null'}`);
 
-// ── ⑤b 登顶即定格：时间冻结、全部计算暂停、界面只剩回看 ──
+// ── ⑤b 登顶后：界面只剩回看；无头工具（= 非实时会话）走 tick 时仍旧定格 ──
+//   ⚠️ 真实会话（`createLoop` 传 `live = true`）登顶后是**慢放** `SAVOR_RATE`，不是定格
+//      —— 那一条由 `probes.mjs` 的登顶探针钉住；这里只负责界面与「非实时会话定格」。
 {
   const money = s.money;
   const elapsed = s.elapsed;
   const stage = s.stage;
   const lv = lineLevel(s, 'r');
-  setTab(1);                                     // 定格要看的「投资线按钮」在「公司」页（两条资产线）
+  setTab(1);                                     // 登顶后要看的「投资线按钮」在「公司」页（两条资产线）
   draw();
   const btns = buttonsIn(app.innerHTML);
   const buys = btns.filter(b => b.data.buy !== undefined);
   const speeds = btns.filter(b => b.data.speed !== undefined);
-  check('定格：旧版「已登顶 · 时间冻结」提示已经让位给「退休」横条',
+  check('登顶后：旧版「已登顶 · 时间冻结」提示已经让位给「退休」横条',
     !app.innerHTML.includes('已登顶 · 时间冻结') && btns.some(b => b.data.retire !== undefined));
-  check('定格：投资线按钮全部 disabled，且倍速按钮**已经整组撤掉**（只剩回看 ＋ ⚙）',
+  check('登顶后：投资线按钮全部 disabled，且倍速按钮**已经整组撤掉**（只剩回看 ＋ ⚙）',
     buys.length === 2 && speeds.length === 0 && buys.every(b => b.disabled),
     `投资线 ${buys.filter(b => b.disabled).length}/2、倍速 ${speeds.length} 个（应为 0）`);
   // 真派发一次 pointerdown：disabled 的元素必须被 bind.js 直接跳过
   if (buys[0]) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(buys[0]) }));
-  tick(s, 600);                                  // 10 分钟的等效时间：不许发生任何事
-  check('定格：点击 + 600 秒 tick 后现金/时间/等级/阶段一个都没动',
+  tick(s, 600);                                  // 非实时会话：10 分钟的等效时间，不许发生任何事
+  check('登顶后（非实时会话）：点击 + 600 秒 tick 后现金/时间/等级/阶段一个都没动',
     s.money === money && s.elapsed === elapsed && s.stage === stage && lineLevel(s, 'r') === lv);
 }
 

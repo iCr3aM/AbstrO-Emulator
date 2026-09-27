@@ -133,15 +133,19 @@ const capMomOf = (s, D) => (s.worldPrevCap > 0 ? toUSD_T(D.marketCap) / s.worldP
  * ⚠️ 副行原来是**一行**「可动用 ¥X ｜ 储备 ¥Y」（用户 2026-09-27 反馈：现金格会随文字跳动
  *    格子高度）—— 两个金额位数一变（`¥432万` → `¥2500.00万亿`），这一行就在 1 行 / 2 行
  *    之间来回折，同一 grid 行被撑高，整块 HUD 跟着跳。拆成两个 `<u>` 后**恒 4 行**。
- *    其余三格 2026-09-27 也补满了第 4 行（见下），现在四格**都是 4 行**，
- *    `style.css` 里 `.hud .cell` 按 4 行预算锁死高度，四格同高。
+ *    其余三格 2026-09-27 也补满了第 4 行（见下），当时四格**都是 4 行**；
+ *    `style.css` 里 `.hud .cell` 仍按 4 行预算锁死高度，四格同高。
+ *    （2026-09-28 净利率格删掉了一行 ⇒ 它是 3 行；锁的是**格子**高度，不是行数。）
  * 三位创始人的年龄挂在目标格的副行（他们不进任何公式，只是叙事）。
  *
  * **2026-09-27 补第三行**（用户：「市值那一个框现在不是三行吗？可是只显示了两行」）：
- * 现金格本来就占满 4 行，其余三格各空一行 ⇒ 现在逐格补上，四格全部 4 行、正好填满 72px：
- *   · 市值格   → `环比 ±x.x%`（与市值榜里玩家行同一个数，见 `capMomOf`）
- *   · 净利率格 → `净利 ¥X`（`R.net` = 年营收 − 年支出，口径与上面的 `年营收` 对得上）
+ * 现金格本来就占满 4 行，其余两格各空一行 ⇒ 现在逐格补上，四格**格子**同高（`.hud .cell` 锁 90px）：
+ *   · 市值格   → `相比上月 ±x.x%`（与市值榜里玩家行同一个数，见 `capMomOf`）
  *   · 世界格   → 未上市写「距下一轮融资 N年」（只剩 IPO 时写 `距上市 ×N`）；上市写名次环比（见下）
+ * ⚠️ **净利率格那行的 `净利 ¥X` 已删**（用户 2026-09-28：「可以删除净利率格末行的显示」）：
+ *    它与现金格标题行右端的 `+¥8862.22亿/年`（`rateOf(R.netPerSec)`）是**同一个数**
+ *    （`net = netPerSec × SEC_PER_YEAR`），只差小数位 —— 一屏说两遍。删掉后那半格是 3 行、
+ *    右半格（世界）仍是 4 行：格子高度本来就锁死，半格少一行不会让 HUD 跳动。
  *
  * 目标达成的表现是**目标文字转绿 + 标题行右端写「完成」**，**不打钩**（用户 2026-09-27）：
  * 打钩只是给词尾缀了一个符号，转绿则把「这一条已经跨过」摊在整个词上 —— 一眼就能扫到。
@@ -194,8 +198,8 @@ function hud(s, R, D) {
   return `
   <div class="hud">
     <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
-    <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>环比 ${mom == null ? '—' : dirEm(mom)}</u></span>
-    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u><u>净利 ¥${fmt(R.net, 0)}</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
+    <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>相比上月 ${mom == null ? '—' : dirEm(mom)}</u></span>
+    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
     <span class="cell goal"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
   </div>`;
 }
@@ -452,13 +456,12 @@ function logClass(t) {
 
 // ─────────────────────────── 主渲染 ───────────────────────────
 /**
- * 登顶之后**定格**：时间冻结、一切计算暂停（`engine.tick` 会直接返回），
- * 界面只剩回看 —— 所以买卖与倍速按钮全部 `disabled`（`bind.js` 的派发会跳过 disabled 元素）。
+ * 登顶之后**只剩回看**（用户 2026-09-28）：时间**慢放**到近乎停住（`content.SAVOR_RATE`，
+ * 现实 2 秒 = 游戏 1 秒），HUD 上的数字还在跳，直到玩家自己点「退休」——
+ * 买卖与倍速因此全部 `disabled` / 撤掉（`bind.js` 的派发会跳过 disabled 元素）。
  * 「设置」不禁：它是删档的唯一入口。
- * ⚠️ 「退休」按钮已删（用户 2026-09-27）：结局是**自动**触发的（`main.js` 的 `draw()`
- *    在 `s.ending === 'top'` 时弹结局），那个按钮只是同一件事的第二个入口 ——
- *    它占着页头一行，却什么也不多做。删掉之后页头收成一行，空出来的位置留给
- *    「已登顶 · 时间冻结」这条提示（原先它是一整块独立的横条）。
+ * ⚠️ 「退休」按钮已删（用户 2026-09-27），取而代之的是 HUD 上面那条通栏横条（见下），
+ *    它是**结局弹窗唯一的手动入口** —— 登顶那一刻不再自动糊一张弹窗上去，那会打断回味。
  */
 export function render(root, s) {
   const R = rates(s);

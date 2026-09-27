@@ -73,7 +73,7 @@ import {
   valAt, winterAt, cycleAt, VAL_CYCLE_AMP, COST_CYCLE_AMP, CYCLE_MONTHS, ORDER_TIERS,
   FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, lineName,
   AUTO_BUY_RESERVE, AUTO_BUY_RESERVE_EARLY, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, AUTO_DECIDE_STAGE,
-  DIL_MIN, DIL_AT,
+  DIL_MIN, DIL_AT, SAVOR_RATE,
 } from '../src/core/content.js';
 import {
   rates, derived, costOf, costFor, purchase, lineLevel, manualCostOf, canAffordManual,
@@ -538,18 +538,27 @@ probe('市值榜每行可点开公司详情（行业 / 国家），同值再点�
 });
 
 /**
- * HUD 三格第四行（用户 2026-09-27：「市值那一个框……只显示了两行的数据，第三行加什么好？
- * 以及净利率和世界的那个框同样」）。四格现在都是 4 行，正好填满锁死的 90px。
+ * HUD 副行（用户 2026-09-27：「市值那一个框……只显示了两行的数据，第三行加什么好？
+ * 以及净利率和世界的那个框同样」）。四格**格子**同高（`.hud .cell` 锁 90px）。
+ *
+ * ⚠️ 2026-09-28 两处修订（用户「可以删除净利率格末行的显示」/「环比不太清晰，改为相比上月」）：
+ *    · 净利率格的 `净利 ¥X` **已删** —— 它与现金格标题行右端的 `+¥…/年` 是同一个数
+ *      （`net = netPerSec × SEC_PER_YEAR`），只差小数位；
+ *    · 市值格那一行的标签由「环比」改成「**相比上月**」。
+ *    这两条一起钉在这里：前者防它被加回来，后者防同义词再漂回去。
  * ⚠️ 三个未上市分支**各自钉死 `calMonth`** —— 世界格那一行是**按日历年算的倒计时**，
  *    不钉的话「第 3 章 + 一轮都没融」这种组合在真实玩法里不可能出现，算出来的年数也没意义。
  */
-probe('HUD 三格第四行：市值环比 / 净利 / 世界格「距下一轮融资 N年」与名次环比', () => {
+probe('HUD 副行：市值「相比上月」/ 世界格「距下一轮融资 N年」与名次环比（无「净利」行）', () => {
   const s = midState(3, 30);
   const at = months => { s.calMonth = months; return 2026 + Math.floor(months / 12); };
   lookTab(s, TAB_FOUNDER);
   const before = visible(root.innerHTML);
-  need(before.includes('净利 ¥'), '净利率格没有第三行「净利 ¥X」');
-  need(before.includes('环比'), '市值格没有第三行「环比」');
+  // ⚠️ 找的是**那一行**（`净利 ¥…`），不是「净利」两个字 —— 格子的标题就叫「净利率」，
+  //    只匹配前两字必然误报。
+  need(!before.includes('净利 ¥'), '净利率格又出现了「净利 ¥X」那一行 —— 它与现金格标题行的 /年 速率是同一个数');
+  need(before.includes('相比上月'), '市值格没有「相比上月」那一行');
+  need(!before.includes('环比'), '界面上还有「环比」这个说法 —— 已统一成「相比上月」');
 
   // ⓐ 一轮都没融 ⇒ 下一轮是天使轮（2031）
   s.finance.rounds = [];
@@ -1199,12 +1208,16 @@ probe('世界榜由玩家进度驱动（世界与日历同一真相源）', () =
   return `世界月 = 日历月 = ${m}（曾跑到 ${ahead}）`;
 });
 
-probe('市值榜三层周期都写进日志：大盘峰谷 / 行业轮动 / 黑天鹅', () => {
+probe('市值榜周期写进日志：大盘峰谷 / 黑天鹅（行业轮动已改成不播报）', () => {
   /**
    * 用户 2026-09-27：「市值榜的周期要有日志或者事件显示」。
-   * 三层周期原本是**看不见的**（名次在动，但不知道为什么动），`cycleNotes()` 把它们写成人话。
-   * 这里验三件事：① 幂等（同一区间跑两次逐字一致）；② 三种标签都真的会出现；
+   * 周期原本是**看不见的**（名次在动，但不知道为什么动），`cycleNotes()` 把它们写成人话。
+   * 这里验三件事：① 幂等（同一区间跑两次逐字一致）；② 两类标签都真的会出现；
    * ③ **回拉分支不重播** —— 那是「重建 + 推进到 target」，在那里播报会把整局重放一遍。
+   *
+   * ⚠️ 第三类「行业轮动」2026-09-28 起**不播报**（用户「日志《【轮动】》展示删除」）：
+   *    榜头那行「当前最热：X」是常驻的同一个 `hotSector`，同一屏说两遍。所以下面从「三类齐」
+   *    改成「大盘 / 黑天鹅齐 + 轮动**必须一条都没有**」—— 后半句是防它被顺手加回来的。
    */
   const w = createWorld('B');
   advanceWorld(w, 480);
@@ -1212,8 +1225,8 @@ probe('市值榜三层周期都写进日志：大盘峰谷 / 行业轮动 / 黑�
   need(cycleNotes(0, 480, w).join('|') === once.join('|'), 'cycleNotes 不幂等（同区间两次结果不同）');
   const has = tag => once.some(t => t.startsWith(tag));
   need(has('【大盘】'), '一整局都没有大盘（泡沫峰谷 / AI 回撤）的播报');
-  need(has('【轮动】'), '一整局都没有行业轮动的播报');
   need(has('【黑天鹅】'), '一整局都没有黑天鹅的播报');
+  need(!has('【轮动】'), '行业轮动又被写进日志了 —— 榜头「当前最热」已经常驻显示同一件事');
   need(once.filter(t => t.startsWith('【黑天鹅】')).length <= 480, '黑天鹅播报条数超过月数（没有做到每月最多一条）');
   // 空区间 / 倒序区间都必须给空数组，否则回拉时会凭空多出几行
   need(cycleNotes(480, 480, w).length === 0, '空区间竟然有播报');
@@ -1224,9 +1237,9 @@ probe('市值榜三层周期都写进日志：大盘峰谷 / 行业轮动 / 黑�
   tick(s, 0);
   advanceWorld(s.world, gameMonths(s) + 240);        // 恶意把世界推到很前面
   tick(s, 0);                                        // 触发回拉
-  const cyc = s.log.filter(t => /^【(大盘|轮动|黑天鹅)】/.test(t)).length;
+  const cyc = s.log.filter(t => /^【(大盘|黑天鹅)】/.test(t)).length;
   need(cyc < 60, `回拉分支把周期事件重播了（日志里 ${cyc} 条周期播报）`);
-  return `${once.length} 条 · 大盘/轮动/黑天鹅齐 · 回拉不重播`;
+  return `${once.length} 条 · 大盘/黑天鹅齐 · 轮动不播报 · 回拉不重播`;
 });
 
 probe('周期播报一局内每句最多一次（文案池按「第几条」轮取、不抽）', () => {
@@ -1247,23 +1260,15 @@ probe('周期播报一局内每句最多一次（文案池按「第几条」轮�
     const dup = arr.length - new Set(arr).size;
     need(dup === 0, `【${k}】${arr.length} 条里有 ${dup} 条重复：${arr.find((x, i) => arr.indexOf(x) !== i)}`);
   }
-  // 池子真被跑起来：黑天鹅（一局 ~15 条）与轮动（一局 6 条）都得报够
+  // 池子真被跑起来：黑天鹅一局 ~15 条，得报够
   need(groups['黑天鹅'].length >= 6, `黑天鹅一局只报了 ${groups['黑天鹅'].length} 条`);
-  const rot = groups['轮动'];
-  need(rot.length >= 5, `轮动一局只报了 ${rot.length} 条`);
-  // 轮动不能全报同一个行业（旧节律按 96 月采样，相位与轮次无关 ⇒ 5/5 全是「太空 / 新范式」）
-  // ⚠️ 2026-09-27 起句式是「【轮动】<赛道><下文>」（破折号去了 —— 为了塞进 366px），
-  //    所以不能再按 ` —— ` 切：改成拿 8 个已知赛道名去对前缀，对不上就是格式写坏了。
-  const rotLabels = rot.map(t => Object.values(SECTOR_LABEL).find(l => t.startsWith(`【轮动】${l}`)));
-  need(rotLabels.every(Boolean), `轮动播报认不出赛道名：${rot.filter((t, i) => !rotLabels[i])[0]}`);
-  const sectors = new Set(rotLabels);
-  need(sectors.size === rot.length, `轮动 ${rot.length} 条只落在 ${sectors.size} 个行业上：${[...sectors].join(' / ')}`);
-  // 黑天鹅涨跌两个池子都要够一局用（最坏情况全压在一个方向上）
+  // ⚠️ 轮动那一类 2026-09-28 已整类删除（见上一条探针），所以这里不再有 `groups['轮动']`。
+  //    黑天鹅涨跌两个池子都要够一局用（最坏情况全压在一个方向上）
   const swans = groups['黑天鹅'];
   need(swans.filter(t => t.includes('暴涨')).length <= 12, '黑天鹅上涨条数超出上涨池（12 条）');
   need(swans.filter(t => t.includes('重挫')).length <= 12, '黑天鹅下跌条数超出下跌池（12 条）');
-  const [bl, rl] = [groups['大盘'].length, rot.length];
-  return `${once.length} 条全不重复 · 大盘 ${bl} · 轮动 ${rl}（${sectors.size} 个行业）· 黑天鹅 ${swans.length}`;
+  const bl = groups['大盘'].length;
+  return `${once.length} 条全不重复 · 大盘 ${bl} · 黑天鹅 ${swans.length}（轮动已不播报）`;
 });
 
 probe('周期播报一行放得下（每条 ≤ 46 单位 —— 手机日志栏 366px）', () => {
@@ -1370,14 +1375,20 @@ probe('名次播报点名了被超越的那一家', () => {
    */
   const lines = A.allLogs.filter(t => /^【世界第 \d+】/.test(t));
   need(lines.length >= 4, `一局只抓到 ${lines.length} 条名次播报 —— 样本不足`);
+  /**
+   * ⚠️ **第 1 名那条已经删了**（用户 2026-09-28）：它原来写 `上面没有人了。`，是唯一不点名的一条，
+   *    而登顶那个 tick 还会落一条 `【登顶】…成了世界第一。`。所以这里从「跳过第 1 名」
+   *    改成「第 1 名**不许再出现**」—— 顺手把「一局只有一条登顶日志」这件事钉住。
+   */
+  need(!lines.some(t => t.startsWith('【世界第 1】')),
+    '登顶的名次播报又回来了 —— 它与【登顶】那条说的是同一件事');
   for (const t of lines) {
     const body = t.slice(t.indexOf('】') + 1);
-    if (/上面没有人了/.test(body)) continue;              // 第 1 名那条不点名（没有「上面那家」）
     need(/^越过了 [^。]+。/.test(body), `没点名：${t}`);
     const who = body.slice(3, body.indexOf('。'));
     need(units(who) <= 8, `点名用了 ${units(who)} 单位（上限 8）：${t}`);
   }
-  return `${lines.length} 条名次播报 · 点名均 ≤ 8 单位`;
+  return `${lines.length} 条名次播报 · 点名均 ≤ 8 单位 · 无「世界第 1」条`;
 });
 
 // ═══════════════════════════ §1.7 离线结算 ═══════════════════════════
@@ -1817,10 +1828,19 @@ probe('归零按钮（买不起）仍然是可点元素 —— 只是压暗', ()
   return '不 disabled，只压暗';
 });
 
-probe('登顶即定格：界面只剩回看，且 tick 不再改变任何东西', () => {
+/**
+ * 登顶之后有**两条分支**（用户 2026-09-28），这条探针把两条都钉住。
+ *
+ * 用户原话是「登顶后……时间变得特别慢……直到玩家点击退休」：真实会话里时间**慢放**而不是定格，
+ * HUD 上的数字一直跳。但离线结算与无头工具必须继续定格 —— 前者会让读档回来发现数字被推进过，
+ * 后者没有「玩家点退休」这个终止条件，会一直跑到超时。分界就是 `tick` 的第三参数 `live`。
+ *
+ * ⚠️ 界面那一半与分支无关：登顶之后投资线 / 待决选项 / 倍速**一律不可点**（买卖已经没必要了）。
+ */
+probe('登顶后：非实时会话仍定格，真实会话按 SAVOR_RATE 慢放（且忽略 s.speed）', () => {
   const s = midState(5, 40);
   s.ending = 'top';
-  s.pending = [{ uid: 9, id: 'e11' }];            // 定格时连待决选项也不许点
+  s.pending = [{ uid: 9, id: 'e11' }];            // 登顶后连待决选项也不许点
   // ⚠️ 待决选项 + 2 条资产线在「公司」页，3 条创始人线在另一页；
   //    倍速在页头（两页都渲染），所以只能从一页里数一次，否则会重复计数。
   const companyBtns = lookTab(s, TAB_COMPANY);
@@ -1829,24 +1849,46 @@ probe('登顶即定格：界面只剩回看，且 tick 不再改变任何东西'
     .concat(founderBtns.filter(b => b.data.buy !== undefined))
     .concat(founderBtns.filter(b => b.data.speed !== undefined));
   need(frozen.length === 2 + 2 + 3 + 3, `可点元素不是 10 个（实得 ${frozen.length}）`);
-  need(frozen.every(b => b.disabled), '定格后仍有能点动的买卖 / 倍速 / 选项按钮');
+  need(frozen.every(b => b.disabled), '登顶后仍有能点动的买卖 / 倍速 / 选项按钮');
   // 设置不许禁：它是删档的唯一入口。
   // 「退休」横条同样不许禁 —— 登顶之后点它就是「再看一遍结局」，禁掉反而没路回去看。
-  need(companyBtns.some(b => b.data.settings !== undefined && !b.disabled), '定格把「设置」也禁掉了');
-  need(companyBtns.some(b => b.data.retire !== undefined && !b.disabled), '定格把「退休」横条也禁掉了');
-  need(!root.innerHTML.includes('已登顶 · 时间冻结'), '定格后还挂着旧版那条「已登顶 · 时间冻结」提示');
-  // 冻结必须发生在引擎里，不能只是界面装样子
-  const snap = JSON.stringify({
+  need(companyBtns.some(b => b.data.settings !== undefined && !b.disabled), '登顶把「设置」也禁掉了');
+  need(companyBtns.some(b => b.data.retire !== undefined && !b.disabled), '登顶把「退休」横条也禁掉了');
+  need(!root.innerHTML.includes('已登顶 · 时间冻结'), '登顶后还挂着旧版那条「已登顶 · 时间冻结」提示');
+
+  /**
+   * ① **非实时会话**（`live` 缺省 = false）—— 离线结算与无头工具走这一条，必须**逐位定格**。
+   *    少了它，读档回来会发现数字被离线推进过，`check` / `probe` 也会一直跑到超时。
+   */
+  const snap = () => JSON.stringify({
     money: s.money, elapsed: s.elapsed, stage: s.stage,
     lines: s.lines, calMonth: s.calMonth, rank: s.worldRank, hasWorld: !!s.world,
   });
+  const before = snap();
   tick(s, 12345);
-  need(JSON.stringify({
-    money: s.money, elapsed: s.elapsed, stage: s.stage,
-    lines: s.lines, calMonth: s.calMonth, rank: s.worldRank, hasWorld: !!s.world,
-  }) === snap, '定格后 12345 秒的 tick 仍在推进（时间没冻结）');
+  need(snap() === before, '非实时会话的 12345 秒 tick 仍在推进（该定格却没有）');
+
+  /**
+   * ② **真实会话**（`createLoop` 传 `live = true`）—— 慢放 `SAVOR_RATE`，**且忽略 `s.speed`**。
+   *    刻意立在 8×：那正是玩家登顶那一刻最可能停的档；回味期若照 8× 算就成了 4×，
+   *    与「特别慢」正好相反。`money = 0` 让 `autoBuy` 无从下手（可动用现金远不及门槛），
+   *    于是读数里只剩「生产」这一项，可以直接对表。
+   */
+  s.money = 0;
+  s.speed = 8;
+  const R0 = rates(s);
+  need(R0.netPerSec > 0, 'fixture 收入为 0，这条探针量不出慢放');
+  const elapsed0 = s.elapsed;
+  const lines0 = JSON.stringify(s.lines);
+  tick(s, 0.4, true);                                    // 现实 0.4 秒 → 游戏 0.2 秒
+  const want = R0.netPerSec * 0.4 * SAVOR_RATE;
+  need(JSON.stringify(s.lines) === lines0, 'fixture 的 autoBuy 动了手，读数被购买污染了');
+  need(Math.abs(s.money - want) <= 1e-9 * want,
+    `回味期推进量不是 netPerSec × dtReal × SAVOR_RATE（实得 ${(s.money / want).toFixed(3)} 倍）`);
+  need(Math.abs(s.elapsed - elapsed0 - 0.4) < 1e-9,
+    '回味期的 elapsed 不是按**真实秒**记的（`s.elapsed` 只记这局玩了多久）');
   setTab(0);
-  return '10 个按钮全禁 · tick 空转';
+  return `10 个按钮全禁 · 非实时定格 · 真实会话 ${SAVOR_RATE}×（忽略 8×）`;
 });
 
 probe('两步删档：第一次只改文案，第二次才真删', () => {
