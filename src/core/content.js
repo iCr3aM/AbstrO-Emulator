@@ -137,16 +137,34 @@ export const companyName = listed => (listed ? 'Abstract Inc' : 'Abstract Studio
  * 第 2/3/5 章的阈值就是照这条反推的：必须先越过本章**入场值**，再落在本章之内。
  * 除第 4/6/7 章（融资轮驱动）与第 8 章（登顶）外，阈值都取在章内 40–60% 处。
  */
+/**
+ * `open` = 每一幕推幕时写进流水的那**一句专属开场**（用户 2026-09-27 拍板）。
+ *
+ * 在此之前八幕共用同一个模板 `【place】years 起 · 目标：goal`（见 `engine.advanceStage`），
+ * 八句除了地名之外一模一样 —— 用户原话：「八章开场白同模板可丰富」。
+ * 现在改成 `2030年【车库】借来的车库，租金按天算。`：年份 + 地名 + **一句只有这一幕有的话**。
+ *
+ * ⚠️ **硬约束：整行必须在手机端日志栏里一行放下、不换行**（用户原话：「字可以短一些」）。
+ *    日志栏 `font-size: 12px`、左右 padding 各 12px，390px 手机上可用宽 **366px**
+ *    ⇒ 全角字符的预算是 **28 个**（`2030年` 里的数字是半角，实际更宽裕）。
+ *    所以 `open` 一律控制在 **16 个全角字以内**。
+ *    `npm run probe` 守字符预算、`npm run shots` 用真 Chromium 量像素（探针守不住字体差异）。
+ *
+ * ⚠️ `goal` **不再进流水** —— HUD「本阶段目标」格已经在显示它（`render.js` 的 `hud()`），
+ *    流水里再念一遍是纯冗余（LESS IS MORE）。
+ * ⚠️ 行首的 `【place】` 是日志着色的判据（`render.js` 的 `LOG_TAGS` → `.li.act`），
+ *    **地名一个字都不能改**，改了推幕那一行就掉回兜底色。
+ */
 export const ACTS = [
   null,
-  { act: 1, years: '2026–2030', place: '出租屋',   goal: '做出原型',           pe: 12, mcap: 1.20e7 },
-  { act: 2, years: '2030–2034', place: '车库',     goal: '找到产品与市场的契合', pe: 14, mcap: 8.53e7 },
-  { act: 3, years: '2034–2039', place: '写字楼',   goal: '拿下千万级大订单',    pe: 16, mcap: 8.74e8 },
-  { act: 4, years: '2039–2044', place: '资本局',   goal: '完成 A 轮融资',       pe: 20, mcap: 8.46e9 },
-  { act: 5, years: '2044–2049', place: '海外分部', goal: '估值破四百亿元',      pe: 26, mcap: 9.72e10 },
-  { act: 6, years: '2049–2054', place: '全球总部', goal: '完成 Pre-IPO 轮',     pe: 34, mcap: 6.65e11 },
-  { act: 7, years: '2054–2060', place: '交易所',   goal: 'IPO 敲钟',            pe: 42, mcap: 2.59e13 },
-  { act: 8, years: '2060–2066', place: '天空塔',   goal: '登顶世界第一',        pe: 50, mcap: 1.87e14 },
+  { act: 1, years: '2026–2030', place: '出租屋',   open: '三张折叠桌，服务器垫在书上。',   goal: '做出原型',           pe: 12, mcap: 1.20e7 },
+  { act: 2, years: '2030–2034', place: '车库',     open: '借来的车库，租金按天算。',       goal: '找到产品与市场的契合', pe: 14, mcap: 8.53e7 },
+  { act: 3, years: '2034–2039', place: '写字楼',   open: '钥匙是租来的，前台有人坐了。',   goal: '拿下千万级大订单',    pe: 16, mcap: 8.74e8 },
+  { act: 4, years: '2039–2044', place: '资本局',   open: '会议室坐六个人，三个不是你们的。', goal: '完成 A 轮融资',      pe: 20, mcap: 8.46e9 },
+  { act: 5, years: '2044–2049', place: '海外分部', open: '地图多了三个点，时差成了日常。', goal: '估值破四百亿元',      pe: 26, mcap: 9.72e10 },
+  { act: 6, years: '2049–2054', place: '全球总部', open: '审计所的人住了六周。',           goal: '完成 Pre-IPO 轮',     pe: 34, mcap: 6.65e11 },
+  { act: 7, years: '2054–2060', place: '交易所',   open: '路演的车一天跑三个城市。',       goal: 'IPO 敲钟',            pe: 42, mcap: 2.59e13 },
+  { act: 8, years: '2060–2066', place: '天空塔',   open: '上到顶层要 40 秒，没人说话。',   goal: '登顶世界第一',        pe: 50, mcap: 1.87e14 },
 ];
 
 /**

@@ -154,6 +154,18 @@ html, body {
 .hud .cell u em { font-style: normal; }
 .hud .cell u em.up { color: var(--ok); }
 .hud .cell u em.down { color: var(--bad); }
+/*
+ * 世界格名次的**分色档位**（用户 2026-09-27：「可以把世界的框的排名，不同排名有不同颜色」）。
+ * 名次本来就在那一格里（`<b>#42</b>`），只是从来没有 `color` —— `#1` 和 `#100` 是同一个白。
+ * 档位由 `render.js` 的 `rankClass()` 决定，这里只写色相。
+ * ⚠️ **只换色相、一个字都不加**：那半格可用宽度实测只有 73px，`#100` 已经 30px。
+ * ⚠️ 没走新的调色板：金 / 青 / 绿 / 正文 / 灰，全是既有变量，与日志着色同一条原则。
+ */
+.hud .cell b.rk-1   { color: var(--gold); }    /* 世界第一 —— 登顶 */
+.hud .cell b.rk-3   { color: var(--accent); }  /* 前三 */
+.hud .cell b.rk-10  { color: var(--ok); }      /* 前十 */
+.hud .cell b.rk-100 { color: var(--fg); }      /* 已入榜 */
+.hud .cell b.rk-out { color: var(--mut); }     /* >100 / 未上市 —— 压暗 */
 /* 目标达成：**不打钩**（用户 2026-09-27）—— 目标文字转绿，标题行右端贴边写「完成」。
    ⚠️ 原来是**绿框**（`border` + `padding` 横向多占 14px）—— 用户 2026-09-27 二次修订：
       「绿色框加了现在会换行」⇒ **去掉框，只留颜色**。框一去掉，这一行也回到单行，不再顶高格子。 */

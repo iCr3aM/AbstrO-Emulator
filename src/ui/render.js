@@ -195,9 +195,30 @@ function hud(s, R, D) {
   <div class="hud">
     <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
     <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>环比 ${mom == null ? '—' : dirEm(mom)}</u></span>
-    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u><u>净利 ¥${fmt(R.net, 0)}</u></span><span class="half"><i>世界</i><b>${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
+    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u><u>净利 ¥${fmt(R.net, 0)}</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
     <span class="cell"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
   </div>`;
+}
+
+/**
+ * 世界格那个名次的**分色档位**（用户 2026-09-27：「可以把世界的框的排名，不同排名有不同颜色」）。
+ *
+ * 先澄清一件事：名次**本来就显示**在世界格里（那个 `<b>#42</b>`），
+ * 但它一直没有 `color` —— `.hud .cell b` 只定了字号，所以 `#1` 和 `#100` 是同一个白。
+ * 这一档是**正在新增的信息**，不是把已有的东西再说一遍。
+ *
+ * ⚠️ **只换色相，一个字都不能加**：那半格实测可用宽度只有 **73px**（`.hud .cell` 177px × 48%），
+ *    `#100` 已经是 30px，再加「第一」「前三」这类字立刻横向溢出（`npm run shots` 会红）。
+ * ⚠️ 色相全部复用现有变量（`--gold` / `--accent` / `--ok` / `--fg` / `--mut`），**不新增调色板** ——
+ *    与日志着色同一条原则：只换色相、饱和度都收着，别让 HUD 变成圣诞树（LESS IS MORE）。
+ * ⚠️ 开局未上市 / 名次在 100 开外时 `r` 为假值，一并走 `rk-out`（压暗）。
+ */
+function rankClass(r) {
+  if (!r || r > RANK_MAX) return 'rk-out';     // >100 / 未上市 —— 压暗
+  if (r === 1) return 'rk-1';                  // 世界第一
+  if (r <= 3) return 'rk-3';                   // 前三
+  if (r <= 10) return 'rk-10';                 // 前十
+  return 'rk-100';                             // 已入榜
 }
 
 // ─────────────────────────── 五条投资线 ───────────────────────────
@@ -392,7 +413,7 @@ function pendingBlock(s, dis) {
  * 改轮次名、加里程碑，颜色自己就跟上了，不用在这里再抄一份。
  */
 const LOG_TAGS = new Map([
-  ...ACTS.filter(Boolean).map(a => [a.place, 'act']),                        // 推幕：【车库】2030–2034 起…
+  ...ACTS.filter(Boolean).map(a => [a.place, 'act']),                        // 推幕：2030年【车库】借来的车库…
   ...ROUNDS.map(r => [r.name, 'fin']),                                       // 融资：【A 轮】到账…
   ...MILESTONES.map(m => [m.text.slice(1, m.text.indexOf('】')), 'mile']),   // 叙事里程碑
   ['改名', 'fin'],
@@ -415,8 +436,14 @@ const WORLD_TAG = /^【世界第 \d+】/;
 function logClass(t) {
   if (YEAR_TAG.test(t)) return ' yr';
   if (WORLD_TAG.test(t)) return ' world';
-  const i = t.indexOf('】');
-  const tag = t.startsWith('【') && i > 1 ? t.slice(1, i) : '';
+  /**
+   * ⚠️ 推幕行 2026-09-27 起带**年份前缀**（`2030年【车库】…`，用户拍板「可加年份」），
+   *    标签不再一定在行首 —— 先把 `20xx年` 摘掉再认，否则 `.li.act` 那一档会静默丢色。
+   *    （`YEAR_TAG` 是另一回事：年度报告写的是 `【2042 年】`，括号在里面。）
+   */
+  const body = t.replace(/^\d{4}\s*年/, '');
+  const i = body.indexOf('】');
+  const tag = body.startsWith('【') && i > 1 ? body.slice(1, i) : '';
   return LOG_TAGS.has(tag) ? ` ${LOG_TAGS.get(tag)}` : '';
 }
 

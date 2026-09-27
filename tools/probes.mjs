@@ -411,7 +411,10 @@ probe('上市且名次 > 20 时钉底（>100 只报「>100」、不画升降、�
   // 名次在 100 开外 ⇒ 具体名次没有信息量，只报 >100（HUD 与钉行同一口径）
   need(s.worldRank > 100, `这条断言要名次 >100 才成立（实得 ${s.worldRank}）`);
   need(root.innerHTML.includes('>100</span>'), '榜单钉行没有显示「>100」');
-  need(root.innerHTML.includes('<b>>100</b>'), 'HUD 世界格没有显示「>100」');
+  // ⚠️ 2026-09-27 起世界格那个 `<b>` 带上了**分色档位** class（`render.js` 的 `rankClass()`）,
+  //    所以这里不能写死 `<b>>100</b>`；`>100` 属于「榜外」，应与未上市一样压暗。
+  need(/>100<\/b>/.test(root.innerHTML), 'HUD 世界格没有显示「>100」');
+  need(root.innerHTML.includes('class="rk-out">>100<'), '>100 应落在 rk-out 档（压暗）');
   need(!root.innerHTML.includes('class="lines"'),
     '「市值榜」页里冒出了投资线 —— 页与页的内容必须互斥');
   // 100 名开外**连升降也不画**：那个区间里名次每天都在漂，↑3 / ↓5 只是噪声
@@ -578,6 +581,82 @@ probe('HUD 三格第四行：市值环比 / 净利 / 世界格「距下一轮融
   need(!/名次/.test(visible(root.innerHTML)), '名次 >100 时这一行应留空');
   setTab(TAB_FOUNDER);
   return `天使轮 ${angel[1]}年 · Pre-IPO ${2051 - yB}年 · ×${m[1]} ／ 上市 ↑3 · ↓2 · 持平 · >100 留空`;
+});
+
+/**
+ * 世界格名次的**分色档位**（用户 2026-09-27：「可以把世界的框的排名，不同排名有不同颜色」）。
+ * 名次本来就显示在那一格里（`<b>#42</b>`），问题是它从来没有 `color` —— `#1` 和 `#100` 同一个白。
+ * 这条守五档有没有真的落到 `class` 上（颜色本身只有 `npm run shots` 的真浏览器能验）。
+ * ⚠️ 档位判据与 `render.js` 的 `rankClass()` 一一对应；`>100` 与未上市都走 `rk-out`。
+ */
+probe('世界格名次分色：第 1 / 前三 / 前十 / 入榜 / 榜外 五档各归其位', () => {
+  const s = midState(6, 60);
+  s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'];   // 上市后才显示名次
+  /**
+   * ⚠️ 边界取 101 而不是 100：`RANK_MAX = 100`（`render.js` 模块级常量），
+   *    所以「第 100 名」还写 `#100`、101 起改写成 `>100`。这一对最容易写错。
+   */
+  const CASES = [[1, '#1', 'rk-1'], [2, '#2', 'rk-3'], [3, '#3', 'rk-3'], [4, '#4', 'rk-10'],
+    [10, '#10', 'rk-10'], [11, '#11', 'rk-100'], [100, '#100', 'rk-100'],
+    [101, '>100', 'rk-out'], [137, '>100', 'rk-out']];
+  for (const [rank, text, want] of CASES) {
+    s.worldRank = rank;
+    lookTab(s, TAB_FOUNDER);
+    const html = root.innerHTML;                     // ⚠️ 不能用 visible() —— 它把标签剥掉了
+    need(html.includes(`class="${want}">${text}<`),
+      `第 ${rank} 名（显示「${text}」）应上 ${want}（HTML 里找不到 class="${want}">${text}<）`);
+  }
+  s.finance.rounds = [];                             // 未上市：名次写 `—`，同样压暗
+  lookTab(s, TAB_FOUNDER);
+  need(root.innerHTML.includes('class="rk-out">—'), '未上市时名次位「—」应压暗（rk-out）');
+  setTab(TAB_FOUNDER);
+  return `${CASES.length} 个名次各归其位（101 起 >100）· 未上市压暗`;
+});
+
+/**
+ * 八章开场白**各不相同**（用户 2026-09-27：「八章开场白同模板可丰富」，拍板「可加年份」）。
+ *
+ * 2026-09-27 之前八幕共用 `【place】years 起 · 目标：goal`，八句除了地名一模一样；
+ * 现在写成 `2030年【车库】借来的车库，租金按天算。`。
+ *
+ * 这里守三件最容易坏的事：
+ *   ① 八条文案**去重后必须是 8**（以后加回同模板会当场红）；
+ *   ② 整行**一行放得下**（用户原话「字可以短一些，确保手机端日志栏一行能够显示不换行就行」）——
+ *      按「半角 1 单位 / 全角 2 单位」折算，日志栏 366px ⇒ 61 单位，留余量取 52
+ *      （像素级由 `npm run shots` 的真 Chromium 实量，这里只守文案别写长）；
+ *   ③ 推幕行**仍然着色** —— 行首多了 `20xx年` 之后，`render.js` 的 `logClass()` 必须先
+ *      摘掉年份前缀再认 `【place】`，否则 `.li.act` 会静默丢色（这条是它的回归断言）。
+ */
+probe('八章开场白：八条各不相同、一行放得下、推幕行仍然着色', () => {
+  const acts = ACTS.filter(Boolean);
+  need(acts.length === 8, `章节数不是 8（${acts.length}）`);
+  for (const a of acts) {
+    need(typeof a.open === 'string' && a.open.trim(), `第 ${a.act} 章（${a.place}）没有 open 文案`);
+    need(!a.open.includes('【'), `第 ${a.act} 章的 open 不该自带【】—— 地名由模板拼（着色靠它）`);
+  }
+  need(new Set(acts.map(a => a.open)).size === 8, '八条开场白去重后不足 8 条 —— 又有同模板的了');
+
+  /** 半角 1 单位 / 全角 2 单位（12px 字体下 1 单位 ≈ 6px） */
+  const units = t => [...t].reduce((n, c) => n + (c.charCodeAt(0) > 0xff ? 2 : 1), 0);
+  const lineOf = a => `${a.years.slice(0, 4)}年【${a.place}】${a.open}`;
+  for (const a of acts) {
+    const w = units(lineOf(a));
+    need(w <= 52, `第 ${a.act} 章推幕行 ${w} 单位（≈${(w / 2).toFixed(1)} 个全角字）> 52 —— 手机会换行：${lineOf(a)}`);
+  }
+
+  // 真的推一幕：`midState(1, 60)` 的市值已越过第 2 章门槛，`tick(s, 0)` 里就会写那一行
+  const s = midState(1, 60);
+  need(s.stage === 2, `样本不成立：stage=${s.stage}（应已推到第 2 章）`);
+  const a2 = ACTS[2];
+  const hits = s.log.filter(t => t.includes(`【${a2.place}】`));
+  need(hits.length === 1, `推幕行应恰好写 1 条（实得 ${hits.length} 条）`);
+  need(hits[0] === lineOf(a2), `推幕行不对（实得「${hits[0]}」，应为「${lineOf(a2)}」）`);
+  need(!/目标：/.test(hits[0]), '推幕行还在念「目标：」—— HUD 的「本阶段目标」格已经在显示它');
+  lookTab(s, TAB_FOUNDER);
+  need(root.innerHTML.includes('class="li act"'), '推幕行没有着色（`.li.act` 丢了 —— 年份前缀没被摘掉？）');
+  setTab(TAB_FOUNDER);
+  const max = Math.max(...acts.map(a => units(lineOf(a))));
+  return `8 条专属开场 · 最长 ${max}/52 单位 · 实测「${hits[0]}」`;
 });
 
 /**

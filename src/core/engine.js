@@ -242,7 +242,19 @@ function advanceStage(s, D) {
   if (!(D.marketCap >= ACTS[s.stage].mcap)) return false;
   s.stage += 1;
   const a = ACTS[s.stage];
-  s.log.push(`【${a.place}】${a.years} 起 · 目标：${a.goal}`);
+  /**
+   * 推幕那一行 = **年份 + 地名 + 一句专属开场**，例：`2030年【车库】借来的车库，租金按天算。`
+   *
+   * 2026-09-27 之前八幕共用一个模板 `【place】years 起 · 目标：goal`，
+   * 八句除了地名完全一样（用户：「八章开场白同模板可丰富」）。现在文案在 `ACTS[].open`，
+   * 这里只负责拼装；`goal` 不再进流水（HUD 的「本阶段目标」格已经在显示它）。
+   *
+   * ⚠️ 年份取 `years` 的**前四位**（`'2030–2034'` → `2030`）—— 段落表里只有起点年份有意义，
+   *    终点年份就是下一幕的起点，写出来只是把同一件事说两遍。
+   * ⚠️ `【place】` 不出现在行首（前面多了 `2030年`），所以 `render.js` 的 `logClass()` 必须
+   *    先摘掉这个年份前缀再认标签，否则推幕行会掉回兜底色（`.li.act` 丢色）。
+   */
+  s.log.push(`${a.years.slice(0, 4)}年【${a.place}】${a.open}`);
   return true;
 }
 
