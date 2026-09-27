@@ -147,29 +147,27 @@ for (const vp of VIEWPORTS) {
     }
 
     /**
-     * 推幕行（`2030年【车库】…`）**必须一行放得下** ——
-     * 用户 2026-09-27 拍板 #1 时的原话：「字可以短一些（确保手机端日志栏一行能够显示不换行就行）」。
+     * **每一条日志都必须一行放得下** ——
+     * 推幕行（`2030年【车库】…`，用户 2026-09-27 拍板 #1 时的原话：「字可以短一些（确保手机端
+     * 日志栏一行能够显示不换行就行）」）与周期播报（`【黑天鹅】/【大盘】/【轮动】`，同日
+     * 「30 条既有周期播报可以顺手收短」）走同一条闸门。
      *
      * 判据不能是「有没有换行」—— 块级元素里文字换行**根本不会造成横向溢出**，
      * `scrollWidth > clientWidth` 那一套完全看不见，所以反过来量：
      * 把这条日志**按现在的字体强行写成一行**，看它需要多宽，再比这一行的实际可用宽。
      *
-     * ⚠️ **只判推幕行**：日志里还有周期播报（`【黑天鹅】/【大盘】/【轮动】`），
-     *    那几条是第五批刻意写长的叙事（用户当时要「描述多样化」），在 366px 里本来就折成两行 ——
-     *    它们是**既有事实、不是本批引入的**，所以这里只报告、不判红（要不要收短由用户另裁）。
      * ⚠️ 克隆体不能直接挂到 `body` 下就量：`.log .li` 是**后代选择器**，脱离了 `.log` 就吃不到
-     *    12px，会按 body 的 14px 算（偏大约 17%），把本来放得下的行报成红。所以字体四个属性显式抄过去。
+     *    12px，会按 body 的 14px 算（偏大），把本来放得下的行报成红。所以字体四个属性显式抄过去。
      * ⚠️ 量的是 `clientWidth`（不是 `offsetWidth`）：日志条 `overflow-y: auto`，桌面端会占掉一条
      *    滚动条宽度 —— 那正是真实可用宽，少算反而会放过真换行的行。
      */
     const logFit = await page.evaluate(() => {
-      const badOpening = [], badOther = [];
-      let opening = 0;
+      const bad = [];
+      let opening = 0, width = 0;
       for (const el of document.querySelectorAll('.log .li')) {
         const t = el.textContent.trim();
         if (!t) continue;
-        const isOpening = /^\d{4}年【/.test(t);          // 推幕行：年份 + 地名 + 专属开场
-        if (isOpening) opening++;
+        if (/^\d{4}年【/.test(t)) opening++;          // 推幕行：年份 + 地名 + 专属开场
         const cs = getComputedStyle(el);
         const probe = document.createElement('div');
         probe.style.cssText = 'position:absolute;left:-9999px;top:0;white-space:nowrap;visibility:hidden';
@@ -181,22 +179,21 @@ for (const vp of VIEWPORTS) {
         document.body.appendChild(probe);
         const need = Math.ceil(probe.getBoundingClientRect().width);
         probe.remove();
+        width = Math.max(width, need);
         const have = el.clientWidth;
-        if (need > have) {
-          const s = `「${t.slice(0, 34)}」需 ${need}px / 可用 ${have}px`;
-          (isOpening ? badOpening : badOther).push(s);
-        }
+        if (need > have) bad.push(`「${t}」需 ${need}px / 可用 ${have}px`);
       }
-      return { badOpening, badOther, opening };
+      return { bad, opening, width };
     });
-    for (const o of logFit.badOpening) { console.log(`  ❌ 推幕行一行放不下：${o}`); fails++; }
-    if (logFit.badOther.length) {
-      console.log(`  ⚠️ 另有 ${logFit.badOther.length} 条非推幕日志会折行（既有周期播报，本次不判红）：${logFit.badOther[0]}`);
-    }
+    // 只列前 5 条：真出问题的时候，一屏 30 行会把别的结论淹掉
+    for (const o of logFit.bad.slice(0, 5)) { console.log(`  ❌ 日志一行放不下：${o}`); }
+    if (logFit.bad.length > 5) console.log(`  ❌ 另有 ${logFit.bad.length - 5} 条同样放不下（共 ${logFit.bad.length} 条）`);
+    fails += logFit.bad.length;
     // 末期档里那 8 条推幕行是**灌进去的**（`lateSaveJson`），量不到就说明样本没生效
     if (era === 'late' && logFit.opening < 8) {
       console.log(`  ❌ 末期档里只量到 ${logFit.opening} 条推幕行（应 8 条）—— 样本没生效`); fails++;
     }
+    console.log(`  📏 最宽的日志 ${logFit.width}px / 可用 ${logFit.bad.length ? '—' : '366px（一行放得下）'}`);
 
     for (const tb of TABS) {
       // ⚠️ 不能用 `page.click()`：本页每 150ms 整页重建一次，元素随时可能被换掉。

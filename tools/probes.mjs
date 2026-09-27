@@ -152,6 +152,14 @@ function stripComments(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
+/**
+ * 一行文字的**宽度预算**（半角 1 单位 / 全角 2 单位）。
+ * 手机日志栏可用宽 **366px**、单位→像素实测约 7（`npm run shots` 量到最宽的一条 308px）
+ * ⇒ 48 单位是死线，各处按 46～48 卡。
+ * 推幕行与周期播报都走这一个函数 —— 别各写一遍（两个预算必须同一个尺子）。
+ */
+const units = t => [...t].reduce((n, c) => n + (c.charCodeAt(0) > 0xff ? 2 : 1), 0);
+
 /** 剥标签，只留玩家真正读到的文字 */
 const visible = html => String(html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -636,12 +644,11 @@ probe('八章开场白：八条各不相同、一行放得下、推幕行仍然�
   }
   need(new Set(acts.map(a => a.open)).size === 8, '八条开场白去重后不足 8 条 —— 又有同模板的了');
 
-  /** 半角 1 单位 / 全角 2 单位（12px 字体下 1 单位 ≈ 6px） */
-  const units = t => [...t].reduce((n, c) => n + (c.charCodeAt(0) > 0xff ? 2 : 1), 0);
+  /** 半角 1 单位 / 全角 2 单位（模块级 `units` 里有换算说明） */
   const lineOf = a => `${a.years.slice(0, 4)}年【${a.place}】${a.open}`;
   for (const a of acts) {
     const w = units(lineOf(a));
-    need(w <= 52, `第 ${a.act} 章推幕行 ${w} 单位（≈${(w / 2).toFixed(1)} 个全角字）> 52 —— 手机会换行：${lineOf(a)}`);
+    need(w <= 48, `第 ${a.act} 章推幕行 ${w} 单位（≈${Math.round(w * 7)}px）> 48 —— 手机会换行：${lineOf(a)}`);
   }
 
   // 真的推一幕：`midState(1, 60)` 的市值已越过第 2 章门槛，`tick(s, 0)` 里就会写那一行
@@ -656,7 +663,7 @@ probe('八章开场白：八条各不相同、一行放得下、推幕行仍然�
   need(root.innerHTML.includes('class="li act"'), '推幕行没有着色（`.li.act` 丢了 —— 年份前缀没被摘掉？）');
   setTab(TAB_FOUNDER);
   const max = Math.max(...acts.map(a => units(lineOf(a))));
-  return `8 条专属开场 · 最长 ${max}/52 单位 · 实测「${hits[0]}」`;
+  return `8 条专属开场 · 最长 ${max}/48 单位 · 实测「${hits[0]}」`;
 });
 
 /**
@@ -1237,7 +1244,11 @@ probe('周期播报一局内每句最多一次（文案池按「第几条」轮�
   const rot = groups['轮动'];
   need(rot.length >= 5, `轮动一局只报了 ${rot.length} 条`);
   // 轮动不能全报同一个行业（旧节律按 96 月采样，相位与轮次无关 ⇒ 5/5 全是「太空 / 新范式」）
-  const sectors = new Set(rot.map(t => t.split(' —— ')[0]));
+  // ⚠️ 2026-09-27 起句式是「【轮动】<赛道><下文>」（破折号去了 —— 为了塞进 366px），
+  //    所以不能再按 ` —— ` 切：改成拿 8 个已知赛道名去对前缀，对不上就是格式写坏了。
+  const rotLabels = rot.map(t => Object.values(SECTOR_LABEL).find(l => t.startsWith(`【轮动】${l}`)));
+  need(rotLabels.every(Boolean), `轮动播报认不出赛道名：${rot.filter((t, i) => !rotLabels[i])[0]}`);
+  const sectors = new Set(rotLabels);
   need(sectors.size === rot.length, `轮动 ${rot.length} 条只落在 ${sectors.size} 个行业上：${[...sectors].join(' / ')}`);
   // 黑天鹅涨跌两个池子都要够一局用（最坏情况全压在一个方向上）
   const swans = groups['黑天鹅'];
@@ -1245,6 +1256,28 @@ probe('周期播报一局内每句最多一次（文案池按「第几条」轮�
   need(swans.filter(t => t.includes('重挫')).length <= 12, '黑天鹅下跌条数超出下跌池（12 条）');
   const [bl, rl] = [groups['大盘'].length, rot.length];
   return `${once.length} 条全不重复 · 大盘 ${bl} · 轮动 ${rl}（${sectors.size} 个行业）· 黑天鹅 ${swans.length}`;
+});
+
+probe('周期播报一行放得下（每条 ≤ 46 单位 —— 手机日志栏 366px）', () => {
+  /**
+   * 用户 2026-09-27：「30 条既有周期播报可以顺手收短」。
+   * 收短前这几条是 60–78 单位（最长那条实测要 586px），在 390px 的手机上全是两行 ——
+   * `ui-shots` 数出 30 条折行，全是这三类周期播报。
+   * 实测 ≈ 7.6px/单位 ⇒ 366px 的死线是 48 单位；这里卡 46，留一档余量。
+   * ⚠️ 预算与推幕行同一个尺子（模块级 `units`），改文案别只看「读起来不长」。
+   * 叙事里程碑（`MILESTONES`）同一天一起收短，用同一条闸门守着。
+   */
+  const w = createWorld('B');
+  advanceWorld(w, 480);
+  const cyc = cycleNotes(0, 480, w).filter(t => /^【(大盘|轮动|黑天鹅)】/.test(t));
+  need(cyc.length >= 25, `一局只量到 ${cyc.length} 条周期播报 —— 样本不足`);
+  const all = [...cyc, ...MILESTONES.map(m => m.text)];
+  for (const t of all) {
+    const n = units(t);
+    need(n <= 46, `${n} 单位（≈${Math.round(n * 7)}px）> 46 —— 手机会折行：${t}`);
+  }
+  const max = Math.max(...all.map(units));
+  return `${cyc.length} 条周期 + ${MILESTONES.length} 条里程碑 · 最长 ${max}/46 单位（≈${Math.round(max * 7)}px）`;
 });
 
 // ═══════════════════════════ §1.7 离线结算 ═══════════════════════════
