@@ -976,6 +976,39 @@ probe('市值榜三层周期都写进日志：大盘峰谷 / 行业轮动 / 黑�
   return `${once.length} 条 · 大盘/轮动/黑天鹅齐 · 回拉不重播`;
 });
 
+probe('周期播报一局内每句最多一次（文案池按「第几条」轮取、不抽）', () => {
+  /**
+   * 用户 2026-09-27：「有些事件出现的描述太重复了……确保只保证一局最多重复两次或者一次」。
+   * 改前：AI 回撤 5 条全同 / 泡沫见顶 4 条全同 / 泡沫见底 3 条全同 / 轮动 5 条全同 /
+   *       黑天鹅 10 条只有 2 种句式（涨跌各一句，撞 6 / 4 次）。
+   * 这条断言把「一局内每句都只出现一次」钉死 —— 以后谁把文案池改小到小于一局的条数，
+   * 或把「轮取」改回「抽」，这里立刻红。
+   */
+  const w = createWorld('B');
+  advanceWorld(w, 480);
+  const once = cycleNotes(0, 480, w);
+  const cat = t => (t.match(/^【([^】]+)】/) || [, '?'])[1];
+  const groups = {};
+  for (const t of once) (groups[cat(t)] ||= []).push(t);
+  for (const [k, arr] of Object.entries(groups)) {
+    const dup = arr.length - new Set(arr).size;
+    need(dup === 0, `【${k}】${arr.length} 条里有 ${dup} 条重复：${arr.find((x, i) => arr.indexOf(x) !== i)}`);
+  }
+  // 池子真被跑起来：黑天鹅（一局 ~15 条）与轮动（一局 6 条）都得报够
+  need(groups['黑天鹅'].length >= 6, `黑天鹅一局只报了 ${groups['黑天鹅'].length} 条`);
+  const rot = groups['轮动'];
+  need(rot.length >= 5, `轮动一局只报了 ${rot.length} 条`);
+  // 轮动不能全报同一个行业（旧节律按 96 月采样，相位与轮次无关 ⇒ 5/5 全是「太空 / 新范式」）
+  const sectors = new Set(rot.map(t => t.split(' —— ')[0]));
+  need(sectors.size === rot.length, `轮动 ${rot.length} 条只落在 ${sectors.size} 个行业上：${[...sectors].join(' / ')}`);
+  // 黑天鹅涨跌两个池子都要够一局用（最坏情况全压在一个方向上）
+  const swans = groups['黑天鹅'];
+  need(swans.filter(t => t.includes('暴涨')).length <= 12, '黑天鹅上涨条数超出上涨池（12 条）');
+  need(swans.filter(t => t.includes('重挫')).length <= 12, '黑天鹅下跌条数超出下跌池（12 条）');
+  const [bl, rl] = [groups['大盘'].length, rot.length];
+  return `${once.length} 条全不重复 · 大盘 ${bl} · 轮动 ${rl}（${sectors.size} 个行业）· 黑天鹅 ${swans.length}`;
+});
+
 // ═══════════════════════════ §1.7 离线结算 ═══════════════════════════
 
 probe('离线：等效游戏时间 = 真实秒 × 0.15，封顶 8 小时', () => {
