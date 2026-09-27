@@ -1612,6 +1612,30 @@ probe('倍速按钮点亮的是当前档位（.on 唯一）', () => {
   return '1× / 4× / 8× 各自唯一点亮';
 });
 
+probe(`决胜段（世界第 ${DIL_AT} 名起）倍速按钮整组撤掉，进带前后各一侧`, () => {
+  /**
+   * 用户 2026-09-27：「减速带的时候，倍速的按钮要消失。」
+   * 撤掉的**理由**是按钮在撒谎：减速乘在 `s.speed` 之外，点 8× 实际得到 4×。
+   * 所以闸门守的是**边界**，两侧各测一次 —— 只测「撤了」会漏掉「该在的时候也不在」这种过度撤回。
+   */
+  const s = midState(7, 60);
+  const speedsAt = () => lookTab(s, TAB_COMPANY).filter(b => b.data.speed !== undefined).map(b => b.data.speed);
+
+  s.worldBest = DIL_AT + 1;                       // 第 6 名 —— 还在带外
+  need(speedsAt().join(',') === '1,4,8', `带外（第 ${DIL_AT + 1} 名）倍速按钮是 [${speedsAt().join(',')}]，应完整`);
+
+  s.worldBest = DIL_AT;                           // 进带的那一刻 —— 按钮必须消失
+  need(speedsAt().length === 0, `第 ${DIL_AT} 名仍有 [${speedsAt().join(',')}] 个倍速按钮 —— 减速时它说的是假的倍速`);
+  need(!/data-speed/.test(root.innerHTML), '倍速按钮没撤干净（还留着 data-speed 节点）');
+
+  s.worldBest = 1;                                // 登顶也一样（`dilate` 同样是 0.5）
+  need(speedsAt().length === 0, '登顶后倍速按钮又回来了 —— 它到结局为止都不该出现');
+
+  s.worldBest = undefined;                        // 未进榜的初始态要还原
+  need(speedsAt().join(',') === '1,4,8', '未进榜时倍速按钮不见了 —— 只有决胜段才该撤');
+  return `第 ${DIL_AT + 1} 名 3 个 · 第 ${DIL_AT} 名起 0 个 · 全程不再回来`;
+});
+
 probe('页签：四个页签各换内容，且这个态住在模块里（全量重建不丢）', () => {
   const s = midState(2, 20);
   lookTab(s, TAB_COMPANY);

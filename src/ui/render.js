@@ -17,7 +17,7 @@ import { ORDER_SLOTS, liveOf, liveCount, hasHot, isHot, monthsLeftOf, valueOf, d
 import { ranking, toUSD_T, SECTOR_LABEL, hotSector, WORLD_START_YEAR } from '../core/world.js';
 import { isListed, ROUNDS, yearNow } from '../core/finance.js';
 import { gameDate, gameYear } from '../core/format.js';
-import { pendingEvent, stageGoalMet, LOG_MAX } from '../core/engine.js';
+import { pendingEvent, stageGoalMet, LOG_MAX, dilate } from '../core/engine.js';
 import { ENDING_TEXT } from '../core/endings.js';
 
 /** 阶段配色：只改一个 CSS 变量，整页基调随之推移（八章各一色） */
@@ -196,7 +196,7 @@ function hud(s, R, D) {
     <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
     <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>环比 ${mom == null ? '—' : dirEm(mom)}</u></span>
     <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u><u>净利 ¥${fmt(R.net, 0)}</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
-    <span class="cell"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
+    <span class="cell goal"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
   </div>`;
 }
 
@@ -465,6 +465,15 @@ export function render(root, s) {
   const D = derived(s, R);
   const a = ACTS[s.stage] || ACTS[1];
   const dis = s.ending ? ' disabled' : '';
+  /**
+   * 决胜段（`worldBest ≤ DIL_AT`）**倍速按钮整组撤掉**（用户 2026-09-27：「减速带的时候，
+   * 倍速的按钮要消失」）。减速因子乘在 `s.speed` **之外**（见 `content.DIL_MIN`）⇒ 此刻能拿到的
+   * 只有 `7.2× … 4×`，而按钮上写着 `1× / 4× / 8×` —— 留着它就是在**撒谎**（点 8× 得到 4×）。
+   * 撤掉，就是「关不掉」这件事的可见形态；`.log` 里那条 `【决胜】时间放慢。` 是它的回执。
+   * ⚠️ 用**撤掉**而不是 `disabled`：`disabled` 还占着位置、还暗示「等一等就能点」，
+   *    而这是**终局规则** —— 到登顶为止都不会回来（登顶后 `worldBest = 1`，同样撤掉，正好一串到底）。
+   */
+  const slowed = dilate(s) < 1;
 
   if (root.style && root.style.setProperty) {
     const acc = ACCENT[s.stage] || ACCENT[1];
@@ -521,7 +530,7 @@ export function render(root, s) {
       <span>${gameDate(s)} · ${esc(a.place)}</span>
     </div>
     <div class="tools">
-      ${SPEEDS.map(v => `<button class="ic${s.speed === v ? ' on' : ''}" data-speed="${v}"${dis}>${v}×</button>`).join('')}
+      ${slowed ? '' : SPEEDS.map(v => `<button class="ic${s.speed === v ? ' on' : ''}" data-speed="${v}"${dis}>${v}×</button>`).join('')}
       <button class="ic" data-settings="1">⚙</button>
     </div>
   </header>

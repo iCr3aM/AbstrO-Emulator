@@ -398,9 +398,9 @@ check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.en
   const speeds = btns.filter(b => b.data.speed !== undefined);
   check('定格：旧版「已登顶 · 时间冻结」提示已经让位给「退休」横条',
     !app.innerHTML.includes('已登顶 · 时间冻结') && btns.some(b => b.data.retire !== undefined));
-  check('定格：投资线与倍速按钮全部 disabled（只剩回看）',
-    buys.length === 2 && speeds.length === 3 && [...buys, ...speeds].every(b => b.disabled),
-    `投资线 ${buys.filter(b => b.disabled).length}/2、倍速 ${speeds.filter(b => b.disabled).length}/3`);
+  check('定格：投资线按钮全部 disabled，且倍速按钮**已经整组撤掉**（只剩回看 ＋ ⚙）',
+    buys.length === 2 && speeds.length === 0 && buys.every(b => b.disabled),
+    `投资线 ${buys.filter(b => b.disabled).length}/2、倍速 ${speeds.length} 个（应为 0）`);
   // 真派发一次 pointerdown：disabled 的元素必须被 bind.js 直接跳过
   if (buys[0]) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(buys[0]) }));
   tick(s, 600);                                  // 10 分钟的等效时间：不许发生任何事

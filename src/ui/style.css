@@ -171,6 +171,15 @@ html, body {
       「绿色框加了现在会换行」⇒ **去掉框，只留颜色**。框一去掉，这一行也回到单行，不再顶高格子。 */
 .hud .cell i em.ok { color: var(--ok); }
 .hud .cell b.done { color: var(--ok); }
+/*
+ * 「本阶段目标」那一格的**目标文案**比别的数值小一号（用户 2026-09-27：「能否将字体缩小？不出现换行？」）。
+ * 它是**唯一一格可能写满一整句话**的（`找到产品与市场的契合` = 10 个全角 = 15px 下 150px），
+ * 而手机上半格的内容宽只有 153px（390px 视口）—— 差 3px 就顶到省略号。
+ * 15px → 13px 后最长一条只要 130px（余量 23px），**再窄的机器也不会被截断**。
+ * ⚠️ `line-height` 必须**显式写回 22.5px**（= 15px × 1.5，见上面「4 行预算」）：字号一改，
+ *    `line-height: 1.5` 会跟着算成 19.5px，目标这一格的三行就比邻格整体上移 3px —— 行高锁死是为了对齐。
+ */
+.hud .cell.goal b { font-size: 13px; line-height: 22.5px; }
 /* 一格装两栏（左净利率 · 右世界排名）：两个 half 并排，各自内部照旧 i/b/u 竖排 */
 .hud .cell .half { display: inline-block; vertical-align: top; width: 48%; }
 .hud .cell .half + .half { text-align: right; }
