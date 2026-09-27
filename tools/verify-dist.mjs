@@ -59,6 +59,18 @@ else bad('资源引用缺少 ?v= 版本串 —— SFTP 覆盖后浏览器可能�
 if (/window\.__APP_VERSION__="\d+"/.test(html)) ok('已注入 window.__APP_VERSION__（运行时版本比对可用）');
 else bad('缺少 window.__APP_VERSION__ 注入');
 
+// ── 产物里不许留 HTML 注释 ──
+// Vite 只剥 bundle 的注释，`index.html` 的 `<!-- ... -->` 会**原样上线**（用户 2026-09-27 实测到 2 处）。
+// 源码里保留、产物里删掉 —— 由 vite.config.js 的 `strip-html-comments` 插件负责，这里守住它。
+// 这条是**回归断言**：哪天插件被删掉或 order 被调乱，构建会当场红掉，而不是悄悄把注释推上线。
+const htmlComments = [...html.matchAll(/<!--[\s\S]*?-->/g)]
+  .map(m => `「${m[0].replace(/\s+/g, ' ').slice(0, 48)}…」`);
+if (htmlComments.length) {
+  bad(`dist/index.html 里还留着 ${htmlComments.length} 处 HTML 注释：${htmlComments.join('、')}`);
+} else {
+  ok('dist/index.html 不含任何 HTML 注释（源码注释已在构建时剥掉）');
+}
+
 // ── B. bundle 能不能真的跑起来 ──
 // 先把真定时器存下来：下面为了模拟浏览器会把 setTimeout/setInterval 打成空实现，
 // 但 Node 的 fetch（undici）内部依赖真定时器，做 HTTP 测试前必须还原，

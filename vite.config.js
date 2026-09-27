@@ -20,8 +20,37 @@ import { defineConfig } from 'vite';
  *    文件名不变（方便覆盖上传），但 URL 每次都不同（强制刷新缓存）。
  *    同时产物里会带 `version.json`，页面运行时会比对版本并提示刷新。
  */
+/**
+ * 构建时剥掉 `index.html` 里的 **HTML 注释**。
+ * ===============================================================
+ * Vite 会剥 bundle（JS/CSS）里的注释，但**不会碰 `index.html` 的 `<!-- ... -->`** ——
+ * 源码里那两段解释「为什么 favicon 要内联」「为什么弹窗层必须在 #app 之外」的注释，
+ * 会**原样**出现在 `dist/index.html` 里被推上线（用户 2026-09-27 实测到 2 处）。
+ *
+ * 处理原则：**源码里保留，产物里删掉**。
+ * 注释是写给改代码的人看的，不是写给玩家的；上线的是 dist，不是 src。
+ * 所以这里只在 `apply: 'build'` 生效 —— `npm run dev` 时你仍然能在源码里看到它们。
+ *
+ * `order: 'post'` 让它排在 Vite 自己的 HTML 变换之后、`tools/postbuild.mjs` 之前
+ * （postbuild 是在 `vite build` 整体结束后才读盘的，天然在后）。
+ * 正则顺带吃掉注释**所在的那一整行**，避免产物里留下空行。
+ * `<!--` 不可能出现在 favicon 的 data URI 里（那里 `<` 已编码成 `%3C`），所以不会误伤。
+ */
+function stripHtmlComments() {
+  return {
+    name: 'strip-html-comments',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler: html => html.replace(/[ \t]*<!--[\s\S]*?-->[ \t]*\r?\n?/g, ''),
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
+
+  plugins: [stripHtmlComments()],
 
   build: {
     outDir: 'dist',
