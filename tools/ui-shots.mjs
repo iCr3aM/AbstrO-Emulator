@@ -4,7 +4,14 @@
  * 为什么需要它：check / click / probe 全都跑在 DOM stub 里，**看不见排版**——
  * 「按钮换行」「文字叠在一起」「日志压住内容」这类问题只有真浏览器渲染才发现。
  * 本工具用 Playwright(Chromium) 把 dist 挂在真实部署路径 /studio/ 下，
- * 对 手机 / 桌面 × 新档 / 末期存档 × 四个页签 各截一张图（共 16 张），存到 `.codebuddy/ui-shots/`。
+ * 对 手机 / 桌面 × 新档（四页签）/ 末期存档（**只截市值榜**，见下）各截一张图，
+ * 存到 `.codebuddy/ui-shots/`。
+ *
+ * ⚠️ 2026-09-28：末期档是**第 8 幕**，而第 8 幕起进了**冲刺段**（`engine.isSprint`）——
+ *    界面被锁在市值榜、其余三个页签 `disabled`（用户诉求 #9：「登顶前无法操作，但能选择加速」）。
+ *    所以末期档只有市值榜那一页是**可达**的，另外三页截图已无意义（点了也停在市值榜），
+ *    这里改成只截市值榜，并**反过来断言**另外三个页签确实点不动 —— 冲刺段这道闸门
+ *    因此也被真浏览器覆盖到。（新档那四页照旧，冲刺段只发生在第 8 幕。）
  *
  * late 模式注入一份第 8 幕的大数值存档 —— 验证「¥2500.00万亿」这种量级
  * 在 HUD / 榜单里不折行、不溢出（用户要求：数字变动之后不能换行）。
@@ -241,7 +248,32 @@ for (const vp of VIEWPORTS) {
     }
     console.log(`  📏 最宽的日志 ${logFit.width}px / 可用 ${logFit.bad.length ? '—' : '366px（一行放得下）'}`);
 
-    for (const tb of TABS) {
+    /**
+     * 第 8 幕是**冲刺段**：只有市值榜可达，其余三个页签 `disabled`（点了也停在市值榜）。
+     * 所以末期档**只截市值榜**，并在这里反过来断言那三个页签确实点不动 ——
+     * 这道闸门因此也被真浏览器覆盖到（`probes.mjs` 那边是 DOM 桩版本）。
+     */
+    if (era === 'late') {
+      const locks = await page.evaluate(() => {
+        const ds = [0, 1, 2].map(i => {
+          const el = document.querySelector(`[data-tab="${i}"]`);
+          return !!(el && el.disabled);
+        });
+        const f = document.querySelector('[data-tab="0"]');     // 试着点「创始人」
+        if (f) f.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+        return ds;
+      });
+      await page.waitForTimeout(250);
+      const onTop = await page.evaluate(() => {
+        const on = document.querySelector('.tab.on');
+        return on ? on.textContent.trim().replace(/\s+\d+$/, '') : '—';
+      });
+      if (locks.some(v => !v)) { console.log(`  ❌ 冲刺段（第 8 幕）有页签没 disabled：${locks.join('/')}（顺序 创始人/公司/订单）`); fails++; }
+      if (onTop !== '市值榜') { console.log(`  ❌ 冲刺段点了「创始人」页签，高亮却跑到「${onTop}」`); fails++; }
+    }
+
+    const tabs = era === 'late' ? [TABS[3]] : TABS;    // 末期档只剩市值榜可达（见上）
+    for (const tb of tabs) {
       // ⚠️ 不能用 `page.click()`：本页每 150ms 整页重建一次，元素随时可能被换掉。
       //    直接派发 `pointerdown`（`bind.js` 的 `PRIMARY_EVENT`）最稳。
       await page.evaluate(i => {

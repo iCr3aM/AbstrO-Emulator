@@ -14,15 +14,15 @@
 
 import {
   ACTS, PENDING_CAP, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, MILESTONES,
-  AUTO_DECIDE_STAGE, DIL_MIN, DIL_AT, SAVOR_RATE,
-  SAVOR_MONTHS_PER_MIN, SAVOR_END_MONTH, SAVOR_MKT_LINES, SAVOR_US_LINES, SAVOR_RIVAL_LINES,
+  AUTO_DECIDE_STAGE, SPRINT_STAGE, DIL_MIN, DIL_AT, SAVOR_RATE,
+  SAVOR_MONTHS_PER_MIN, SAVOR_END_MONTH, SAVOR_MKT_LINES, SAVOR_US_LINES,
   CYCLE_MONTHS, CYCLE_RISE, CYCLE_CRASH,
   eventsFor, eventById, companyName,
 } from './content.js';
 import { rates, derived, purchase, lowestLine, costFor, spendableOf } from './economy.js';
 import { financeTick, isListed } from './finance.js';
 import { ordersTick } from './orders.js';
-import { worldTick, ranking, cycleNotes, shortName } from './world.js';
+import { worldTick, ranking, cycleNotes } from './world.js';
 import { calMonthOf, gameYear, gameMonths, fmt } from './format.js';
 
 /**
@@ -293,13 +293,27 @@ export function dilate(s) {
   return 1 - (1 - DIL_MIN) * w;
 }
 
+// ─────────────────────────── 冲刺段（锁操作）───────────────────────────
+/**
+ * 是否已进入**冲刺段**（用户 2026-09-28：「登顶前无法操作，但是能选择加速」）。
+ *
+ * 判据是**章节**（`SPRINT_STAGE = 8`），不是 `dilate < 1`、也不是 `s.ending`：
+ *   · `dilate < 1` 从第 5 名（实测月 431）就开始，那时玩家还在第 8 章里点投资线；
+ *   · `s.ending` 是**登顶之后**（回味期），那时早就不许操作了。
+ *
+ * ⚠️ 它只被两个消费者用：`main.js` 的 handler（决定**玩家的动作**要不要执行）
+ *    与 `render.js`（把正文钉在市值榜上、提示文案）。`tick` **不看它** ——
+ *    锁的是玩家的手，不是模拟本身（无头工具照旧跑满）。纯函数、不写状态。
+ */
+export const isSprint = s => (s.stage || 1) >= SPRINT_STAGE;
+
 // ─────────────────────────── 回味期的月度市场快讯 ───────────────────────────
 /**
  * 每跨一个游戏月落**一条**市场快讯（第九批 §5）—— 这是回味期日志栏里唯一的内容。
  *
- * 五类**按优先级**：①②（黑天鹅 / 大盘·特殊）直接复用 `world.js` 的池子 ——
+ * 四类**按优先级**：①②（黑天鹅 / 大盘·特殊）直接复用 `world.js` 的池子 ——
  * `cycleNotes(m − 1, m, w)` 恰好给出「第 m 月」那一条，命中就用它；没命中就从
- * ③④⑤（大盘·常规 / 我们 / 对手）里按月轮转。于是 240 个月的回味期**月月有文案**，
+ * ③④（大盘·常规 / 我们）里按月轮转。于是 240 个月的回味期**月月有文案**，
  * 而且不会出现「同一个月两条」。
  *
  * ⚠️ 只在 `engine.tick` 的回味分支调用：`worldTick` 那边已经关掉了 `cycleNotes`
@@ -314,12 +328,13 @@ function savorNews(s, fromMonth, toMonth) {
   }
 }
 
-/** ③④⑤ 按月轮转 —— 每月恰好占一类，相邻月不重类 */
+/**
+ * ③④ 按月轮转 —— 每月恰好占一类，相邻月不重类。
+ * ⚠️ `%3` → `%2`：第 ⑤ 类「对手」已删（用户 2026-09-28），双类轮转。
+ */
 function savorRegular(m, s) {
-  const cls = ((m % 3) + 3) % 3;
-  if (cls === 0) return marketLine(m);
-  if (cls === 1) return usLine(m, s);
-  return rivalLine(m, s);
+  const cls = ((m % 2) + 2) % 2;
+  return cls === 0 ? marketLine(m) : usLine(m, s);
 }
 
 /**
@@ -343,21 +358,18 @@ function usLine(m, s) {
   const mom = prev > 0 ? (cur / prev - 1) : 0;
   const p = Math.abs(Math.round(mom * 100));
   if (marketPhase(m) === 'crash') return SAVOR_US_LINES.crash(fmt(s.savorCap || 0), p);
-  if (mom < 0) return SAVOR_US_LINES.down(fmt(s.savorCap || 0), p);
+  /**
+   * ⚠️ 跌幅**不足 0.5%** 时 `p` 会取整成 0，「本月跌 0%」是自相矛盾的一句 ——
+   *    用户 2026-09-28 正是因为「对手经常本月涨 0%」把对手那一类整个删掉了。
+   *    玩家这一类保留，但这种情况改成一句**不报数字**的话（长度也短，不会顶破 46 单位）。
+   */
+  if (mom < 0) {
+    return p > 0
+      ? SAVOR_US_LINES.down(fmt(s.savorCap || 0), p)
+      : `【我们】市值 ${fmt(s.savorCap || 0)}，本月几乎持平。`;
+  }
   const higher = rival.cur > 0 ? Math.round((cur / rival.cur - 1) * 100) : 0;
   return SAVOR_US_LINES.up(fmt(s.savorCap || 0), higher);
-}
-
-/** ⑤ 对手：点名榜上紧贴我们的那一家（玩家恒为第 1 ⇒ 它就是第二名），说它本月涨跌 */
-function rivalLine(m, s) {
-  const cur = s.worldCap || 0;
-  const prev = s.worldPrevCap != null ? s.worldPrevCap : cur;
-  const rival = ranking(s.world, cur, 2, prev).all.find(c => !c.me);
-  if (!rival) return null;
-  const p = Math.abs(Math.round(rival.mom * 100));
-  return rival.mom < 0
-    ? SAVOR_RIVAL_LINES.down(shortName(rival.n), p)
-    : SAVOR_RIVAL_LINES.up(shortName(rival.n), p);
 }
 
 /** 当月处在 `cycleAt` 锯齿的哪一段 —— ③ 与 ④ 共用同一套判据 */
@@ -465,7 +477,7 @@ export function tick(s, dtReal = 0.1, live = false) {
     s.log.push = keepPush;
 
     logMilestones(s, D);                             // 会让出静音，见上
-    savorNews(s, from, s.calMonth);                  // 每月一条，五类按优先级
+    savorNews(s, from, s.calMonth);                  // 每月一条，四类按优先级
 
     if (s.log.length > LOG_MAX) s.log.splice(0, s.log.length - LOG_MAX);
     return { R, D };

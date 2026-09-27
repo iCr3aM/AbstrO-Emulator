@@ -10,14 +10,14 @@
 
 import {
   ACTS, LINES, lineName, FOUNDERS, agesAt, PENDING_CAP, SEC_PER_YEAR, companyName, MILESTONES,
-  IPO_LINE,
+  IPO_LINE, SAVOR_RATE,
 } from '../core/content.js';
 import { rates, derived, manualCostOf, canAffordManual, sharePctOf } from '../core/economy.js';
 import { ORDER_SLOTS, liveOf, liveCount, hasHot, isHot, monthsLeftOf, valueOf, describeOrder, doneCount } from '../core/orders.js';
 import { ranking, toUSD_T, SECTOR_LABEL, hotSector, WORLD_START_YEAR } from '../core/world.js';
 import { isListed, ROUNDS, yearNow } from '../core/finance.js';
 import { gameDate, gameYear } from '../core/format.js';
-import { pendingEvent, stageGoalMet, LOG_MAX, dilate } from '../core/engine.js';
+import { pendingEvent, stageGoalMet, LOG_MAX, dilate, isSprint } from '../core/engine.js';
 import { ENDING_TEXT } from '../core/endings.js';
 
 /** 阶段配色：只改一个 CSS 变量，整页基调随之推移（八章各一色） */
@@ -74,6 +74,12 @@ const tUsd = v => v.toFixed(2);
 /** 市值榜只显示前 20 名；名次超出 100 只报「>100」（榜单之外的名次没有意义） */
 const RANK_SHOW = 20;
 const RANK_MAX = 100;
+/**
+ * 从第几章起，HUD 的世界格开始报**上市前的名次**（用户 2026-09-28：「如果融资后……可以显示」）。
+ * 实测（`best` 路径）：第 2–6 章整整 300 个月卡在 114~148 名，写出来只是一个不动的数字；
+ * 第 7 章（月 340）开始往上冲，月 351 首次进前 100 ⇒ 第 7 章才有信息量。
+ */
+const RANK_EST_STAGE = 7;
 
 /**
  * 净收入的显示 —— **单位与量级两件事一起管**（用户 2026-09-27：读数要能看到单位）。
@@ -89,6 +95,46 @@ function rateOf(v) {
   return a < 1e4
     ? `${sign}¥${fmt(a)}/秒`
     : `${sign}¥${fmt(a * SEC_PER_YEAR)}/年`;
+}
+
+/**
+ * **近 N 游戏秒真实入账回推的年化**（用户 2026-09-28：「现金 加xxxx/年 的数字也要跟着跳动……
+ * 回味期你可以合理将数字显示正常上升下降而不是硬切」）。
+ *
+ * 为什么不能直接用 `R.netPerSec`：它只是**五条线等级的函数**（`economy.rates`），两次购买
+ * 之间是一个**常数** ⇒ 表现是「几秒不动、然后跳一格」。这正是用户说的「硬切」。
+ *
+ * 这里量的是**最近 `RATE_WIN` 游戏秒里现金真的变了多少**，再换算成「元/游戏秒」——
+ * 与 `netPerSec` 同一个单位，所以 `rateOf` 一个字都不用改。
+ *   · 「游戏秒」= 真实秒 × 本帧的时间倍率（`engine.tick` 里那个 `dt` 的口径）——
+ *     不除这个倍率的话，8× 档读出来是 1× 档的 8 倍：同一家公司在页头换个档位就换一个
+ *     「年营收」，那是撒谎。
+ *   · 它是**测量**不是**逼近**：滑窗里真的发生了什么就报什么（购买把它拉下去、产能爬上来
+ *     又把它推回去）。不做「向目标值指数逼近」那种永远落后真值的假平滑。
+ *   · 首帧 / 读档第一帧没有历史 ⇒ 回落到 `R.netPerSec`（唯一诚实的兜底），
+ *     所以无头工具里「渲染一次就断言」的那类探针读到的仍是老值。
+ *
+ * ⚠️ 这是**渲染模块自己的内存态**，与 `tab` / `rankSel` 同规矩：不进存档、不进 core。
+ */
+const RATE_WIN = 3;                     // 游戏秒
+let rateTrace = [];                     // [{ gs, money }] —— gs = 累计游戏秒
+let rateGs = 0;                         // 累计游戏秒
+let rateAt = 0;                         // 上一次采样的真实秒
+
+/** 本帧的时间倍率 —— 必须与 `engine.tick` 的 `dt` 逐字一致（回味期忽略倍速与减速） */
+const stepRate = s => (s.ending ? SAVOR_RATE : (s.speed || 1) * dilate(s));
+
+function liveNet(s, netPerSec) {
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
+  if (rateAt > 0 && now > rateAt) rateGs += (now - rateAt) * stepRate(s);
+  rateAt = now;
+  rateTrace.push({ gs: rateGs, money: s.money || 0 });
+  while (rateTrace.length > 1 && rateGs - rateTrace[0].gs > RATE_WIN) rateTrace.shift();
+  const oldest = rateTrace[0];
+  const dGs = rateGs - oldest.gs;
+  if (!(dGs > 0.25)) return netPerSec;                  // 窗口还没攒够（含「渲染一次就断言」的探针）
+  const v = ((s.money || 0) - oldest.money) / dGs;
+  return Number.isFinite(v) ? v : netPerSec;
 }
 
 /** 名次变化（`rankDelta` 正数 = 上升；`null` = 本月新入场） */
@@ -160,48 +206,69 @@ function hud(s, R, D) {
   const ages = agesAt(s.stage);
   const who = FOUNDERS.map(f => `${f.name} ${ages[f.id]}`).join(' · ');
   const goal = stageGoalMet(s, R, D);
-  /**
-   * ⚠️ **上市前不进榜**（GDD §1.4）：名次只在 IPO 之后显示。
-   * `s.worldRank` 本身一直在算（结局判据要用），但「显示」是另一条规则。
-   * 进了榜但排在 100 名开外 ⇒ 只报 `>100` —— 具体是 137 还是 152 对玩家没有信息量。
-   */
   const listed = isListed(s);
   const r = s.worldRank;
-  const ranked = listed ? (r && r <= RANK_MAX ? `#${r}` : `>${RANK_MAX}`) : '—';
+  /**
+   * 名次文本 —— **三种口径**（2026-09-28 重排，用户诉求 #3 / #7）：
+   *
+   *   · 已上市（现状）：`#42` ／ `>100`。进了榜但排在 100 名开外只报 `>100` ——
+   *     具体是 137 还是 152 对玩家没有信息量。
+   *   · **未上市但已进第 7 章**：100 名开外写 **`预估 >100`**（用户原话口径）——
+   *     榜上根本没有他这一行，那个名次只能**推算**出来，所以加「预估」两个字。
+   *     名次真的进了前 100（实测月 351 起）就照实写 `#97`：那时它已经能被直接看到，
+   *     **而且写不下** —— 半格只有 73px，`预估 #97 ↑3` 会横向溢出（`npm run shots` 会红）。
+   *   · 第 2–6 章：`—`（实测那 300 个月一直卡在 114~148 名，写出来只是个不动的数字）。
+   */
+  const inList = !!(r && r <= RANK_MAX);
+  const ranked = listed ? (inList ? `#${r}` : `>${RANK_MAX}`)
+    : s.stage >= RANK_EST_STAGE ? (inList ? `#${r}` : `预估 >${RANK_MAX}`)
+    : '—';
+  /**
+   * 名次升降 —— **贴在名次右边**（用户 2026-09-28：「名次上升下降放在 排名右边」）。
+   * 原来是世界格的**最后一行**（`名次 ↑3`），现在与名次同一行、同一字号，读起来是一个整体。
+   * ⚠️ 只在 `r ≤ 100` 时给 —— 与榜单里玩家行同一条规矩：100 名开外那个区间每天在漂，
+   *    `↑3 / ↓5` 只是噪声，反而让人以为有事发生。
+   */
+  const dRank = listed && s.worldRankPrev != null && inList ? s.worldRankPrev - r : 0;   // 正数 = 前进
+  const worldDelta = dRank > 0 ? ` <em class="up">↑${dRank}</em>`
+    : dRank < 0 ? ` <em class="down">↓${-dRank}</em>` : '';
   const mom = capMomOf(s, D);
   /**
-   * 世界格的第四行 —— **没上市做「下一轮融资倒计时」，上市了说「名次比上个月动了几名」**。
+   * 世界格的**第三行** —— 原来写「未上市 / 已上市」，2026-09-28 起换成
+   * **「距下一轮融资的时间进度」**（用户诉求 #8：「距 xx 天使轮 b轮等 改为百分比 xx%」）。
    *
-   * 未上市这一段（用户 2026-09-27 二次裁决）：原来写 `距上市 ×7954`（差多少倍市值），
-   * 数字虽准，但开局是「×7954」这种八千倍的数，读起来只有「还早得很」，没有目标感。
-   * 改成**下一轮融资的倒计时**：`距天使轮 5年` / `距Pre-A轮 6年` … `距C轮 3年`。
+   * 口径取**时间进度** = `(今年 − 上一轮年份) / (本轮年份 − 上一轮年份)`：
+   * 融资轮本来就是按**年份**触发的（`finance.ROUNDS[].year`），所以时间进度是唯一
+   * 会自然走到 100% 的口径（按市值算永远差一点，因为推进到下一轮还要看门槛）。
+   * 天使轮的「上一轮年份」用公司成立那年（`WORLD_START_YEAR` = 2026）。
+   *
    * ⚠️ **只剩 `ipo` 那一轮时回到「距上市 ×N」** —— IPO 是**市值门槛**（`D.marketCap ≥ IPO_LINE`），
-   *    与年份无关，写成「距 IPO N 年」是假的。这也是唯一一处「跨阶段」的正确口径。
-   * ⚠️ 轮次名里的空格要**去掉**（`Pre-A 轮` → `Pre-A轮`）：半格实测可用宽度仅 73px，
-   *    带空格时 `Pre-A 轮 6年` 是 75px、`距 Pre-IPO 7年` 是 76px，都会横向溢出（`npm run shots`）。
-   *    去空格后 `距Pre-IPO 7年` / `距Pre-A轮 6年` 都恰好 73px。
+   *    与年份无关，写成「距 IPO xx%」是假的。这是唯一一处「跨阶段」的正确口径。
+   * ⚠️ 轮次名里的空格要**去掉**（`Pre-A 轮` → `Pre-A轮`，`Pre-IPO` 本来就是连写）：
+   *    这一行实测最宽的是 `距Pre-IPO 100%`（≈81px），而世界半格改成 54% 后有 82px。
+   * ⚠️ `距上市 ×N` **只保留整数**：一位小数会写出 `×41.7万`，会溢出。
    *
-   * ⚠️ 名次在 100 名开外时**这一行留空**（用户 2026-09-27 拍板），与榜单里玩家行同一条规矩：
-   *    那个区间每天在漂，↑3 / ↓5 只是噪声，反而让人以为有事发生。（格子高度是锁死的，留空不会跳。）
-   * ⚠️ `距上市 ×N` **只保留整数**：一位小数会写出 `×41.7万`（77px），同样溢出。
+   * ⚠️ **上市之后这一行留空**（用户 2026-09-28 裁决）：原来那行「已上市」与页头的
+   *    公司名（已经变成 `Abstract Inc`）是同一件事说两遍。
    */
   let worldSub = '';
   if (!listed) {
-    const nr = ROUNDS.find(x => !s.finance.rounds.includes(x.id));
-    worldSub = nr && nr.id !== 'ipo'
-      ? `距${nr.name.replace(/\s+/g, '')} ${Math.max(0, nr.year - yearNow(s))}年`
-      : `距上市 ×${fmt(IPO_LINE / D.marketCap, 0)}`;
-  } else if (s.worldRankPrev != null && r && r <= RANK_MAX) {
-    const d = s.worldRankPrev - r;                     // 正数 = 排名前进（与榜单 `rankDelta` 同向）
-    worldSub = d > 0 ? `名次 <em class="up">↑${d}</em>`
-      : d < 0 ? `名次 <em class="down">↓${-d}</em>`
-      : '名次持平';
+    const i = ROUNDS.findIndex(x => !s.finance.rounds.includes(x.id));
+    const nr = ROUNDS[i];
+    if (nr && nr.id !== 'ipo') {
+      const fromY = i > 0 ? ROUNDS[i - 1].year : WORLD_START_YEAR;
+      const span = Math.max(1, nr.year - fromY);
+      const pct = Math.round(Math.max(0, Math.min(1, (yearNow(s) - fromY) / span)) * 100);
+      worldSub = `距${nr.name.replace(/\s+/g, '')} ${pct}%`;
+    } else {
+      worldSub = `距上市 ×${fmt(IPO_LINE / D.marketCap, 0)}`;
+    }
   }
   return `
   <div class="hud">
-    <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
-    <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>相比上月 ${mom == null ? '—' : dirEm(mom)}</u></span>
-    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
+    <span class="cell"><i>现金<em>${rateOf(liveNet(s, R.netPerSec))}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
+    <span class="cell"><i>市值${listed ? '' : '<em>预估</em>'}</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>相比上月 ${mom == null ? '—' : dirEm(mom)}</u></span>
+    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}${worldDelta}</b><u>${worldSub}</u></span></span>
     <span class="cell goal"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
   </div>`;
 }
@@ -346,7 +413,26 @@ function rankBlock(s, D) {
   if (!s.world) return '<div class="rank"><div class="rank-head"><span>世界市值榜</span><span>单位：万亿美元</span></div></div>';
   const listed = isListed(s);
   const cap = listed ? toUSD_T(D.marketCap) : null;
-  const { top, all } = ranking(s.world, cap, RANK_SHOW, s.worldPrevCap ?? null);
+  /**
+   * **月内进度** —— 榜单里每一家的 `cur` 与名次都按它插值（用户 2026-09-28
+   * 「回味期的数字变换不够丝滑，隔月就硬切了……其他公司市值也可以同样处理」）。
+   * ⚠️ **环比列不插值**（`ranking` 里已写明理由）：它是整月的事实，插值会得到「月初 0%」。
+   *
+   * `s.world.month` 恒 = `floor(s.calMonth)`（`worldTick` 里就是这样推的）⇒ 这个差天然落在
+   * `[0, 1)`，跨月那一帧趋近 1、下一帧回到 0，曲线**连续**。
+   * 玩家自己的市值（`D.marketCap`）本来就逐帧连续（回味期锚在插值后的榜首上，见 `worldTopAt`）
+   * ⇒ 两边同一节奏，不会再出现「自己的数字在滑、别人的数字在跳」。
+   *
+   * ⚠️ **只在回味期插值**（`s.ending`）。正常段（含冲刺段）取 1 = 月末口径，与
+   *    `worldTick` 写下的 `s.worldRank` 逐位一致 —— 那两处**同屏**（HUD 的 `#9 ↑3` 与
+   *    榜单自己那一列），任何相位差都会变成「两个地方报不同名次」。
+   *    正常段之所以不需要插值：玩家自己的市值也踩在月度网格上（`valAt(gameMonths)`），
+   *    整榜一起按月跳；只有回味期玩家市值改锚到连续曲线上，才必须让别家也连续。
+   */
+  const frac = s.ending
+    ? Math.max(0, Math.min(1, (s.calMonth || 0) - (s.world.month || 0)))
+    : 1;
+  const { top, all } = ranking(s.world, cap, RANK_SHOW, s.worldPrevCap ?? null, frac);
   const me = all.find(c => c.me);
   const mine = companyName(listed);
   const row = c => {
@@ -469,7 +555,17 @@ export function render(root, s) {
   const R = rates(s);
   const D = derived(s, R);
   const a = ACTS[s.stage] || ACTS[1];
-  const dis = s.ending ? ' disabled' : '';
+  /**
+   * **操作锁** = 回味期 ∪ 冲刺段（用户 2026-09-28：「登顶前无法操作，但是能选择加速」）。
+   *
+   * 冲刺段从**第 8 章**起（`isSprint`）：那一章没有年度决策（`AUTO_DECIDE_STAGE = 7`），
+   * 玩家剩下的「点投资线 / 点订单」本来就由自动购买与自动交付包办（`check --idle` 零决策
+   * 照样通关）⇒ 锁的不是玩法，而是「必须自己去点 tab 才看得到市值榜」这层摩擦。
+   * `main.js` 的 handler 有同一把锁（渲染层只是把按钮画灰，真正拦下动作的是那边）。
+   */
+  const dis = (s.ending || isSprint(s)) ? ' disabled' : '';
+  /** 只有回味期才需要禁用的东西（页头工具区）—— 冲刺段还要留着加速 */
+  const endDis = s.ending ? ' disabled' : '';
   /**
    * 决胜段（`worldBest ≤ DIL_AT`）**倍速按钮整组撤掉**（用户 2026-09-27：「减速带的时候，
    * 倍速的按钮要消失」）。减速因子乘在 `s.speed` **之外**（见 `content.DIL_MIN`）⇒ 此刻能拿到的
@@ -477,16 +573,27 @@ export function render(root, s) {
    * 撤掉，就是「关不掉」这件事的可见形态；`.log` 里那条 `【决胜】时间放慢。` 是它的回执。
    * ⚠️ 用**撤掉**而不是 `disabled`：`disabled` 还占着位置、还暗示「等一等就能点」，
    *    而这是**终局规则** —— 到登顶为止都不会回来（登顶后 `worldBest = 1`，同样撤掉，正好一串到底）。
+   *
+   * ⚠️ **冲刺段例外**（用户 2026-09-28：「最后的登顶有点太慢了……我感觉也可以改为类似回味期一样，
+   *    登顶前无法操作，但是能选择加速」）：第 8 章里操作已经锁了（`dis`），玩家的唯一动作就是
+   *    「看着自己往上爬」——此时把加速拿掉，等于在最想加速的地方把加速收走（第八批 §3 的
+   *    「按钮在撒谎」只适用于**操作还开着**的时候）。
+   *    做法是**把原本那三个按钮还给他**，不加新控件、不加新状态：此刻能拿到的确实是
+   *    `8 × dilate`（≈4×~7.2×），而按钮只是「再快一点」的意思 —— 玩家自己也清楚
+   *    终局会慢下来。**登顶之后（回味期）维持撤掉**：那时 `SAVOR_RATE` 完全无视 `s.speed`，
+   *    留着按钮才是真撒谎。
    */
   const slowed = dilate(s) < 1;
+  /** 页头倍速按钮要不要出现：回味期撤掉；冲刺段（含减速带）保留 */
+  const showSpeeds = !s.ending && (isSprint(s) || !slowed);
 
   /**
-   * 登顶之后**只剩市值榜**（第九批 §6）：其余三个页签 `disabled`（`bind.js` 的派发会跳过
-   * `disabled` 元素），而且**正文一律改画市值榜** —— 否则玩家登顶那一刻若正停在「公司」页，
-   * 页签已经点不动了，却还看着那一页的残影，只剩退休这一条路。
-   * 买卖 / 待决 / 倍速此时本来就已经 `disabled` / 撤掉，于是可点的只剩「市值榜」与「退休」。
+   * **登顶之后 / 冲刺段只剩市值榜**（第九批 §6 + 用户 2026-09-28）：其余三个页签 `disabled`
+   * （`bind.js` 的派发会跳过 `disabled` 元素），而且**正文一律改画市值榜** ——
+   * 否则玩家那一刻若正停在「公司」页，页签已经点不动了，却还看着那一页的残影。
+   * 买卖 / 待决此时本来就已经 `disabled`，于是页面上可点的只剩「市值榜」与加速 / 退休。
    */
-  const page = s.ending ? TAB_RANK : tab;
+  const page = (s.ending || isSprint(s)) ? TAB_RANK : tab;
 
   if (root.style && root.style.setProperty) {
     const acc = ACCENT[s.stage] || ACCENT[1];
@@ -518,8 +625,8 @@ export function render(root, s) {
   const tabs = TABS.map((t, i) => {
     const hot = ((i === TAB_ORDER && hasHot(s)) || (i === TAB_COMPANY && s.pending.length > 0)) ? ' hot' : '';
     const n = i === TAB_ORDER ? liveCount(s) : i === TAB_COMPANY ? s.pending.length : 0;
-    // 登顶后其余三个页签一律 disabled（`page` 已经锁定在市值榜，见上）
-    const off = s.ending && i !== TAB_RANK ? ' disabled' : '';
+    // 登顶后 / 冲刺段其余三个页签一律 disabled（`page` 已经锁定在市值榜，见上）
+    const off = (s.ending || isSprint(s)) && i !== TAB_RANK ? ' disabled' : '';
     return `<button class="tab${i === page ? ' on' : ''}${hot}" data-tab="${i}"${off}>${esc(t)}${n ? ` ${n}` : ''}</button>`;
   }).join('');
 
@@ -545,7 +652,7 @@ export function render(root, s) {
       <span>${gameDate(s)} · ${esc(a.place)}</span>
     </div>
     <div class="tools">
-      ${slowed ? '' : SPEEDS.map(v => `<button class="ic${s.speed === v ? ' on' : ''}" data-speed="${v}"${dis}>${v}×</button>`).join('')}
+      ${showSpeeds ? SPEEDS.map(v => `<button class="ic${s.speed === v ? ' on' : ''}" data-speed="${v}"${endDis}>${v}×</button>`).join('') : ''}
       <button class="ic" data-settings="1">⚙</button>
     </div>
   </header>

@@ -70,7 +70,7 @@ import {
   ACTS, LINES, LINE_IDS, EVENTS, eventsFor, eventById, PENDING_CAP, IPO_LINE,
   CURVE_RATIO, LINE_GROWTH, INCOME_SCALE, SEC_PER_YEAR, RESERVE_FRAC, MILESTONES,
   OFFLINE_CAP_SEC, OFFLINE_MODIFIER, PE_MIN, PE_MAX, PE_BASE, START_MCAP, LINE_COST0,
-  valAt, winterAt, cycleAt, VAL_CYCLE_AMP, COST_CYCLE_AMP, CYCLE_MONTHS, ORDER_TIERS,
+  valAt, winterAt, cycleAt, VAL_CYCLE_AMP, COST_CYCLE_AMP, CYCLE_MONTHS, CYCLE_RISE, ORDER_TIERS,
   FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, lineName,
   AUTO_BUY_RESERVE, AUTO_BUY_RESERVE_EARLY, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, AUTO_DECIDE_STAGE,
   DIL_MIN, DIL_AT, SAVOR_RATE,
@@ -87,7 +87,7 @@ import {
 } from '../src/core/orders.js';
 import {
   tick, pendingEvent, resolvePending, applyEffect, stageGoalMet, offlineRun, LOG_MAX,
-  manualBuy, dilate,
+  manualBuy, dilate, isSprint,
 } from '../src/core/engine.js';
 import { ROUNDS, isListed } from '../src/core/finance.js';
 import { ENDING_TEXT, evaluateRetirement } from '../src/core/endings.js';
@@ -100,7 +100,7 @@ import {
 } from '../src/core/format.js';
 import {
   createWorld, advanceWorld, ranking, worldDate, worldTick, toUSD_T, RMB_PER_T_USD, cycleNotes,
-  SECTOR_LABEL, hotSector, worldTop,
+  SECTOR_LABEL, hotSector, worldTop, worldTopAt,
 } from '../src/core/world.js';
 import {
   render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab, setRankSel,
@@ -406,7 +406,10 @@ probe('未上市不进榜；上市后才出现「我们」', () => {
   const s = midState(3, 30);
   lookTab(s, 3);                                  // 榜单在「市值榜」页（第 4 个页签）
   need(!root.innerHTML.includes('class="row me"'), '未上市的主界面里出现了玩家行');
-  need(visible(root.innerHTML).includes('未上市'), 'HUD 没写「未上市」');
+  // ⚠️ 2026-09-28：世界格的「未上市 / 已上市」那一行已删（用户诉求 #8），
+  //    改由**市值格的「预估」**承担同一件事（用户诉求 #6：「没上市前应该写市值 预估」）。
+  need(!visible(root.innerHTML).includes('未上市'), 'HUD 还在写「未上市」—— 已改为市值格的「预估」');
+  need(visible(root.innerHTML).includes('市值 预估'), '未上市时市值格没写「预估」');
   s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'];
   lookTab(s, 3);
   need(root.innerHTML.includes('class="row me"'), '上市后榜单里没有玩家行');
@@ -542,17 +545,22 @@ probe('市值榜每行可点开公司详情（行业 / 国家），同值再点�
  * HUD 副行（用户 2026-09-27：「市值那一个框……只显示了两行的数据，第三行加什么好？
  * 以及净利率和世界的那个框同样」）。四格**格子**同高（`.hud .cell` 锁 90px）。
  *
- * ⚠️ 2026-09-28 两处修订（用户「可以删除净利率格末行的显示」/「环比不太清晰，改为相比上月」）：
+ * ⚠️ 2026-09-28 三处修订：
  *    · 净利率格的 `净利 ¥X` **已删** —— 它与现金格标题行右端的 `+¥…/年` 是同一个数
  *      （`net = netPerSec × SEC_PER_YEAR`），只差小数位；
- *    · 市值格那一行的标签由「环比」改成「**相比上月**」。
- *    这两条一起钉在这里：前者防它被加回来，后者防同义词再漂回去。
- * ⚠️ 三个未上市分支**各自钉死 `calMonth`** —— 世界格那一行是**按日历年算的倒计时**，
- *    不钉的话「第 3 章 + 一轮都没融」这种组合在真实玩法里不可能出现，算出来的年数也没意义。
+ *    · 市值格那一行的标签由「环比」改成「**相比上月**」；
+ *    · 世界格第三行由「距离 / 未上市」改成**融资轮的时间进度百分比**
+ *      （用户诉求 #8：「距 xx 天使轮 b轮等 改为百分比 xx%」），且名次升降**贴到名次右边**。
+ *    这三条一起钉在这里：防它们被改回去。
+ * ⚠️ 三个未上市分支**各自钉死 `calMonth`** —— 世界格那一行是**按日历年算的进度**，
+ *    不钉的话「第 3 章 + 一轮都没融」这种组合在真实玩法里不可能出现，算出来的百分比也没意义。
+ * ⚠️ `%` 采用**四舍五入**（`render.worldSub` 里 `Math.round`），探针必须用同一个口径，
+ *    否则 83.33% 会与 83% 差一个整数位而误判。
  */
-probe('HUD 副行：市值「相比上月」/ 世界格「距下一轮融资 N年」与名次环比（无「净利」行）', () => {
+probe('HUD 副行：市值「相比上月」/ 世界格「距下一轮 xx%」与名次升降贴名次右（无「净利」行）', () => {
   const s = midState(3, 30);
   const at = months => { s.calMonth = months; return 2026 + Math.floor(months / 12); };
+  const pctOf = (y, fromY, toY) => Math.round(Math.max(0, Math.min(1, (y - fromY) / Math.max(1, toY - fromY))) * 100);
   lookTab(s, TAB_FOUNDER);
   const before = visible(root.innerHTML);
   // ⚠️ 找的是**那一行**（`净利 ¥…`），不是「净利」两个字 —— 格子的标题就叫「净利率」，
@@ -561,22 +569,24 @@ probe('HUD 副行：市值「相比上月」/ 世界格「距下一轮融资 N�
   need(before.includes('相比上月'), '市值格没有「相比上月」那一行');
   need(!before.includes('环比'), '界面上还有「环比」这个说法 —— 已统一成「相比上月」');
 
-  // ⓐ 一轮都没融 ⇒ 下一轮是天使轮（2031）
+  // ⓐ 一轮都没融 ⇒ 下一轮是天使轮（2031）；起点取公司成立那年（2026）
   s.finance.rounds = [];
   const yA = at(12);                                    // 2027 年
   lookTab(s, TAB_FOUNDER);
-  const angel = /距天使轮 (\d+)年/.exec(visible(root.innerHTML));
-  need(angel, `未上市且下一轮是天使轮时应写「距天使轮 N年」（实得「${visible(root.innerHTML)}」）`);
-  need(Number(angel[1]) === 2031 - yA, `「距天使轮 ${angel[1]}年」≠ 2031 − ${yA}`);
+  const angel = /距天使轮 (\d+)%/.exec(visible(root.innerHTML));
+  need(angel, `未上市且下一轮是天使轮时应写「距天使轮 xx%」（实得「${visible(root.innerHTML)}」）`);
+  const wantA = pctOf(yA, 2026, ROUNDS[0].year);
+  need(Number(angel[1]) === wantA, `「距天使轮 ${angel[1]}%」≠ (${yA} − 2026) ÷ (${ROUNDS[0].year} − 2026) = ${wantA}%`);
 
-  // ⓑ 融到 C 轮 ⇒ 下一轮是 Pre-IPO。**名字里的空格必须去掉**（73px 预算，带空格是 75~76px）
+  // ⓑ 融到 C 轮 ⇒ 下一轮是 Pre-IPO。**名字里的空格必须去掉**（`Pre-A 轮` → `Pre-A轮`）
   s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c'];
   const yB = at(288);                                   // 2050 年
   lookTab(s, TAB_FOUNDER);
-  need(visible(root.innerHTML).includes(`距Pre-IPO ${2051 - yB}年`),
-    `下一轮是 Pre-IPO 时应写「距Pre-IPO N年」（实得「${visible(root.innerHTML)}」）`);
+  const wantB = pctOf(yB, ROUNDS[4].year, ROUNDS[5].year);
+  need(visible(root.innerHTML).includes(`距Pre-IPO ${wantB}%`),
+    `下一轮是 Pre-IPO 时应写「距Pre-IPO xx%」（实得「${visible(root.innerHTML)}」）`);
 
-  // ⓒ 只剩 IPO ⇒ 回到市值口径（IPO 是市值门槛，写「距 IPO N 年」是假的）
+  // ⓒ 只剩 IPO ⇒ 回到市值口径（IPO 是市值门槛，写「距 IPO xx%」是假的）
   s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo'];
   at(312);                                              // 2052 年
   lookTab(s, TAB_FOUNDER);
@@ -587,26 +597,30 @@ probe('HUD 副行：市值「相比上月」/ 世界格「距下一轮融资 N�
   const want = fmt(IPO_LINE / derived(s).marketCap, 0);
   need(m[1] === want, `「距上市 ×${m[1]}」≠ IPO_LINE ÷ 当前市值 = ×${want}`);
 
-  // ⓓ 上市后：这一行改成名次环比，且融资倒计时必须消失
+  // ⓓ 上市后：第三行**留空**，名次升降贴到名次右边（用户诉求 #7：「放在 排名右边」）
+  // ⚠️ 用「创始人」页而不是「市值榜」页：市值榜本身有成排的 ↑N / ↓N，`!/[↑↓]/` 那种断言
+  //    会被榜单里的箭头误伤。HUD 是**跨页常驻**的，在创始人页照样能验。
   s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'];
   s.worldRank = 42;
   s.worldRankPrev = 45;
-  lookTab(s, TAB_RANK);
+  lookTab(s, TAB_FOUNDER);
   const up = visible(root.innerHTML);
-  need(!/距(上市|天使轮)/.test(up), '上市后世界格还写着融资 / 上市倒计时');
-  need(up.includes('名次 ↑3'), `世界格没写名次上升（实得「${up}」）`);
+  need(!/距(上市|天使轮|Pre-IPO)/.test(up), '上市后世界格还写着融资 / 上市进度');
+  need(up.includes('#42 ↑3'), `世界格没把名次上升写在名次右边（实得「${up}」）`);
   s.worldRankPrev = 40;
-  lookTab(s, TAB_RANK);
-  need(visible(root.innerHTML).includes('名次 ↓2'), '名次下滑没写 ↓N');
+  lookTab(s, TAB_FOUNDER);
+  need(visible(root.innerHTML).includes('#42 ↓2'), '名次下滑没把 ↓N 写在名次右边');
   s.worldRankPrev = 42;
-  lookTab(s, TAB_RANK);
-  need(visible(root.innerHTML).includes('名次持平'), '名次没变没写「持平」');
+  lookTab(s, TAB_FOUNDER);
+  const flat = visible(root.innerHTML);
+  need(flat.includes('#42') && !/[↑↓]/.test(flat), `名次没变时不该画箭头（实得「${flat}」）`);
   s.worldRankPrev = 50;
-  s.worldRank = 137;                                   // 100 名开外 ⇒ 这一行留空（那一区间天天在漂）
-  lookTab(s, TAB_RANK);
-  need(!/名次/.test(visible(root.innerHTML)), '名次 >100 时这一行应留空');
+  s.worldRank = 137;                                   // 100 名开外 ⇒ 连升降一起省掉（那一区间天天在漂）
+  lookTab(s, TAB_FOUNDER);
+  const out = visible(root.innerHTML);
+  need(out.includes('>100') && !/[↑↓]/.test(out), `名次 >100 时不该画箭头（实得「${out}」）`);
   setTab(TAB_FOUNDER);
-  return `天使轮 ${angel[1]}年 · Pre-IPO ${2051 - yB}年 · ×${m[1]} ／ 上市 ↑3 · ↓2 · 持平 · >100 留空`;
+  return `天使轮 ${angel[1]}% · Pre-IPO ${wantB}% · ×${m[1]} ／ 上市 #42 ↑3 · ↓2 · 持平无箭头 · >100 无箭头`;
 });
 
 /**
@@ -1001,9 +1015,15 @@ probe('赛道份额：以外生行业盘子 TAM(year) 为分母，从 0% 单调�
   return `开局 ${open.toFixed(3)}% → 终局 ${end.toFixed(1)}%（全程单调）`;
 });
 
-probe('投资线的份额渲染：八章全程都不越过 60%（修掉「饱和到 99%」）', () => {
+probe('投资线的份额渲染：前七章都不越过 60%（修掉「饱和到 99%」；第 8 章冲刺段锁市值榜）', () => {
   const out = [];
-  for (let a = 1; a <= 8; a++) {
+  /**
+   * ⚠️ 2026-09-28：只走到**第 7 章**。第 8 章起是**冲刺段**（`engine.isSprint`）——
+   *    界面被强制锁到市值榜、其余三个页签 disabled（用户诉求 #9：「登顶前无法操作，
+   *    但能选择加速」），所以「创始人页上的份额」在第 8 章**根本渲染不出来**。
+   *    份额本身的单调性由上面那条 `sharePctOf` 探针全程 1–8 章守着，这里只管**渲染**。
+   */
+  for (let a = 1; a <= 7; a++) {
     const s = midState(a, a * 4);
     lookTab(s, TAB_FOUNDER);                    // 「份额」那一行在「创始人」页（投营销）
     const m = /赛道份额 ([\d.]+)%/.exec(visible(root.innerHTML));
@@ -1012,8 +1032,13 @@ probe('投资线的份额渲染：八章全程都不越过 60%（修掉「饱和
     need(p >= 0 && p <= 60 + 1e-9, `第 ${a} 章份额 ${p}% 越界`);
     out.push(p.toFixed(0));
   }
+  // 第 8 章：请求创始人页，冲刺段把实际页强制成市值榜，且那一页看不到投资线
+  const s8 = midState(8, 32);
+  lookTab(s8, TAB_FOUNDER);
+  need(visible(root.innerHTML).includes('世界市值榜'), '第 8 章冲刺段没有把界面锁到市值榜');
+  need(!visible(root.innerHTML).includes('赛道份额'), '第 8 章冲刺段仍渲染出投资线（该锁死操作）');
   setTab(0);
-  return `1–8 章：${out.join('% / ')}%`;
+  return `1–7 章：${out.join('% / ')}% ／ 第 8 章锁市值榜`;
 });
 
 probe('事件增强：选项按钮带效果数字；第 AUTO_DECIDE_STAGE 幕起不再打扰玩家', () => {
@@ -1107,7 +1132,7 @@ probe('ACT_MONTHS 与 ACTS[].years 一致，且首尾相接铺满 480 月', () =
  *    阶梯规定了月增速最低 +2.55%（第 1 章），而正弦的月跌幅上限只有 1.35% ⇒ 环比永不为负。
  *    现在形状换成锯齿（同一 ±25% 的带，压缩到 3 个月里释放），低谷才真的出现。
  */
-probe('低谷可见：一局正好 4 段 ≥5% 的低谷', () => {
+probe('低谷可见：四段周期低谷都在（噪声可另加 ≤4 段浅坑）', () => {
   const pts = A.caps;
   need(pts.length > 1000, `只采到 ${pts.length} 个 tick（一局没走完）`);
   /**
@@ -1139,10 +1164,45 @@ probe('低谷可见：一局正好 4 段 ≥5% 的低谷', () => {
    *    （寒冬就该咬人），只是不是设计意义上的「一段低谷」——「一段低谷」的判据是 ≥5%。
    */
   const visible = dips.filter(g => depth(g) >= 0.05);
-  need(visible.length === 4,
-    `≥5% 的低谷 ${visible.length} 段（一局应为 4 段）—— 周期长度或市值阶梯动过。全部候选段：\n      `
+  /**
+   * ⚠️ 2026-09-28：断言由「**正好** 4 段」放宽为 **4–8 段** —— 估值噪声（`content.valNoise`，
+   *    用户要的「相比上月随机性大一点」）会在锯齿的陡跌之外再造出 ≥5% 的小坑
+   *    （实测第 100→104 月 −5.7%，落在成本寒冬与锯齿低谷之间）。那是设计的一部分，不是回归。
+   *    真正必须守住的仍然是**四个周期顶点各配一段低谷**，见下面的逐个断言。
+   */
+  need(visible.length >= 4 && visible.length <= 8,
+    `≥5% 的低谷 ${visible.length} 段（应在 4–8 段）—— 周期长度或市值阶梯动过。全部候选段：\n      `
     + dips.map(show).join('\n      '));
-  return visible.map(show).join(' ｜ ')
+  /**
+   * 四个周期顶点（`u = CYCLE_RISE` ⇒ 第 57 / 177 / 297 / 417 月）**附近**必须出现一段
+   * ≥5% 的回撤 —— 这是「一局四段低谷」真正要守的那条线。
+   *
+   * ⚠️ 顶点取**窗口内的实测最大值**（`[m0−3, m0+3]`）而不是直接取第 m0 月：年营收在涨，
+   *    市值的实际高点会随阶梯与噪声前后漂一两个月（实测第 3 段顶点落在 296~298）。
+   *    谷底取顶点之后到 `m0+9` 的最低点。
+   * ⚠️ 为什么不直接用上面按 tick 切的段：第 3 段那次，噪声让市值在骤跌中途小幅反弹一下
+   *    ⇒ 一个周期的低谷被**切成两段**（各自 <5%），按段数判会整段漏掉。
+   */
+  const byMonth = new Map();
+  for (const p of pts) byMonth.set(p.m, p.v);
+  const TOPS = [0, 1, 2, 3].map(k => CYCLE_RISE + k * CYCLE_MONTHS);
+  const gaps = TOPS.map(m0 => {
+    let peakV = -Infinity, peakM = m0;
+    for (let m = m0 - 3; m <= m0 + 3; m++) {
+      const v = byMonth.get(m);
+      if (v != null && v > peakV) { peakV = v; peakM = m; }
+    }
+    let lowV = peakV, lowM = peakM;
+    for (let m = peakM; m <= m0 + 9; m++) {
+      const v = byMonth.get(m);
+      if (v != null && v < lowV) { lowV = v; lowM = m; }
+    }
+    return { m0, peakM, lowM, dd: 1 - lowV / peakV };
+  });
+  const txt = gaps.map(g => `顶点 ${g.peakM} → 谷底 ${g.lowM} 月 −${(g.dd * 100).toFixed(1)}%`).join(' · ');
+  need(gaps.every(g => g.dd >= 0.035), `周期低谷过浅（应 ≥3.5%）：${txt}`);
+  return `四段周期低谷：${txt} ｜ ≥5% 共 ${visible.length} 段：`
+    + visible.map(show).join(' ｜ ')
     + (dips.length > visible.length ? `（另 ${dips.length - visible.length} 段浅坑 <5%）` : '');
 });
 
@@ -1966,6 +2026,17 @@ probe('回味期：世界继续走，玩家恒为第一，gap 是一条缓慢爬
    * 1210 真实秒 = 24.2 游戏年 > 回味期全长 20 分钟 ⇒ 一定能走到封顶（`Math.min` 夹住后
    * 下一帧就被 `s.calMonth >= SAVOR_END_MONTH` 那个出口挡住）。多跑的那几步不动任何数。
    */
+  /**
+   * 同一帧的榜首（**插值口径**）。
+   * ⚠️ 2026-09-28：不能用 `worldTop(s.world)` —— 那是**月末整值**（`cur`）。
+   *    回味期的玩家市值 `savorCap` 是按月内进度 `frac` 插值出来的（`worldTick`），
+   *    两者相差最多一个月相位 ⇒ gap 会周期性探到 0 以下，探针误判「玩家掉到榜首之下」。
+   *    榜单渲染（`render.rankBlock`）用的也是这个插值口径，这里必须与它逐字一致。
+   */
+  const topAt = () => {
+    const frac = Math.max(0, Math.min(1, (s.calMonth || 0) - (s.world.month || 0)));
+    return worldTopAt(s.world, frac);
+  };
   for (let i = 0; i < 1210; i++) {
     tick(s, 1, true);
     worst = Math.max(worst, s.worldRank);
@@ -1974,7 +2045,7 @@ probe('回味期：世界继续走，玩家恒为第一，gap 是一条缓慢爬
     // 封顶之后本就该彻底静止 ⇒ 只统计封顶之前
     if (prevCap != null && c === prevCap && s.calMonth < SAVOR_END_MONTH - 1e-9) flat++;
     prevCap = c;
-    const g = c - worldTop(s.world);                       // 玩家高出榜首多少
+    const g = c - topAt();                                 // 玩家高出榜首多少
     if (g < lo) lo = g;
     if (g > hi) hi = g;
     if (i === 119) early = g;                              // 登顶 +2 真实分钟（24 游戏月）
@@ -1989,7 +2060,7 @@ probe('回味期：世界继续走，玩家恒为第一，gap 是一条缓慢爬
   need(lo >= -1e-6, `gap 出现负值 ${lo.toFixed(3)} T —— 玩家掉到榜首之下`);
   need(hi <= SAVOR_GAP_MID + SAVOR_GAP_AMP + 1e-6,
     `gap 顶到 ${hi.toFixed(2)} T（应 ≤ ${SAVOR_GAP_MID + SAVOR_GAP_AMP} T）`);
-  const end = toUSD_T(s.savorCap) - worldTop(s.world);     // 封顶那一帧
+  const end = toUSD_T(s.savorCap) - topAt();               // 封顶那一帧
   need(end >= SAVOR_GAP_MID - SAVOR_GAP_AMP - 1e-6 && end <= SAVOR_GAP_MID + SAVOR_GAP_AMP + 1e-6,
     `封顶那一帧 gap = ${end.toFixed(2)} T，不在 ${SAVOR_GAP_MID}±${SAVOR_GAP_AMP} 内`);
   // +2 真实分钟 = 24 游戏月 ⇒ u = 0.1 ⇒ gap 至多 `满值 × 0.1`（这里留到 0.15 的余量）。
@@ -2263,7 +2334,7 @@ probe('真实接线跑一遍：从渲染出的 HTML 点到待决选项与投资�
 
 // ═══════════════════════════ 渲染烟测 ═══════════════════════════
 
-probe('八个阶段逐一渲染都不抛错，且都有世界榜与四格 HUD', () => {
+probe('八个阶段逐一渲染都不抛错：前七章四页签齐全，第 8 章冲刺段锁市值榜', () => {
   for (let a = 1; a <= 8; a++) {
     // ⚠️ 这里**不 tick**：tick 会因为市值超门槛自动推章，测不到「第 a 章长什么样」
     const s = createState();
@@ -2276,16 +2347,32 @@ probe('八个阶段逐一渲染都不抛错，且都有世界榜与四格 HUD', 
     need((html.match(/class="cell[ "]/g) || []).length === 4, `第 ${a} 章 HUD 不是四格`);
     need(html.includes(ACTS[a].place), `第 ${a} 章没显示地点（${ACTS[a].place}）`);
     need(visible(html).includes(ACTS[a].goal), `第 ${a} 章没显示目标`);
-    // 五条线分两页 —— 两页都要看，不能只验其中一页
-    lookTab(s, TAB_FOUNDER);
-    need((root.innerHTML.match(/class="line"/g) || []).length === 3, `第 ${a} 章创始人页不是三条线`);
-    lookTab(s, TAB_COMPANY);
-    need((root.innerHTML.match(/class="line"/g) || []).length === 2, `第 ${a} 章公司页不是两条资产线`);
-    lookTab(s, TAB_ORDER);
-    need(root.innerHTML.includes('class="orders"'), `第 ${a} 章订单页没有订单区`);
+    if (!isSprint(s)) {
+      // 前七章：五条线分两页 —— 两页都要看，不能只验其中一页
+      lookTab(s, TAB_FOUNDER);
+      need((root.innerHTML.match(/class="line"/g) || []).length === 3, `第 ${a} 章创始人页不是三条线`);
+      lookTab(s, TAB_COMPANY);
+      need((root.innerHTML.match(/class="line"/g) || []).length === 2, `第 ${a} 章公司页不是两条资产线`);
+      lookTab(s, TAB_ORDER);
+      need(root.innerHTML.includes('class="orders"'), `第 ${a} 章订单页没有订单区`);
+    } else {
+      /**
+       * ⚠️ 2026-09-28（用户诉求 #9：「登顶前无法操作，但能选择加速」）：
+       *    第 8 章起是**冲刺段** ⇒ 不管点哪个页签，实际页都被强制成市值榜，
+       *    其余三个页签带 `disabled`（倍速按钮**保留**，那正是「能选择加速」）。
+       */
+      for (const t of [TAB_FOUNDER, TAB_COMPANY, TAB_ORDER]) {
+        lookTab(s, t);
+        need(visible(root.innerHTML).includes('世界市值榜'), `第 ${a} 章冲刺段没有把页锁到市值榜`);
+      }
+      const off = (root.innerHTML.match(/data-tab="\d" disabled/g) || []).length;
+      need(off === 3, `第 ${a} 章冲刺段不是三个页签 disabled（实得 ${off}）`);
+      need((root.innerHTML.match(/data-speed="/g) || []).length === 3,
+        `第 ${a} 章冲刺段没有保留三个倍速按钮（「能选择加速」）`);
+    }
   }
   setTab(0);
-  return '1–8 章全部可渲染';
+  return '1–7 章四页签齐全 · 第 8 章锁市值榜（三个页签 disabled、倍速保留）';
 });
 
 probe('创始人只出现在文案里，不进任何公式', () => {

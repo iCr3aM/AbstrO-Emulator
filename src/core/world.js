@@ -200,14 +200,36 @@ export function worldDate(w) {
  * @param {number} playerCap     玩家市值（**万亿 USD**；外部负责把 RMB 换来）
  * @param {number} n             返回前 n 名
  * @param {number} playerCapPrev 玩家上月末市值（同上单位）。缺省 = 不显示玩家的环比/名次变化
+ * @param {number} progress  月内进度 ∈ [0,1]（缺省 1 = 月末值，与旧行为逐位一致）。
+ *   ⚠️ 只为**显示层**而设（用户 2026-09-28：「回味期的数字变换不够丝滑，隔月就硬切了」）：
+ *      世界表在 `advanceWorld` 里是**按月整跳**的（`prev` = 上月末、`cur` = 本月末），
+ *      把这一对线性插值出来就是一条连续曲线，跨月那一帧 `progress → 1` 给出 `cur`，
+ *      下一月 `progress = 0` 给出同一个 `prev` ⇒ **天然连续，不需要多存一个字**。
+ *   ⚠️ 排序与 `rank` 都用**插值后**的值（用户 2026-09-28：「名次上升下降也跟着动」）——
+ *      否则数字是滑的、名次却是跳的，两种节奏混在一屏里更怪。
+ *   ⚠️ **不许**把这个参数带进 `worldTick`：那里的 `cap` / `rank` 是**环比基准与棘轮**，
+ *      必须是月末整数口径（见 `worldTick` 里写 `s.worldCap` / `s.worldRank` 那两行）。
+ *   ⚠️ 纯函数、不写状态 ⇒ `progress = 1` 时与旧版逐位相同，探针与存档都不受影响。
  */
-export function ranking(w, playerCap = null, n = 10, playerCapPrev = null) {
+export function ranking(w, playerCap = null, n = 10, playerCapPrev = null, progress = 1) {
+  const p = Math.max(0, Math.min(1, progress));
   const isNew = c => c.born != null && c.born === w.month;
-  const list = w.companies.map(c => ({
-    ...c,
-    mom: c.prev > 0 ? c.cur / c.prev - 1 : 0,
-    isNew: isNew(c),
-  }));
+  const list = w.companies.map(c => {
+    const cur = c.prev + (c.cur - c.prev) * p;
+    return {
+      ...c,
+      cur,
+      /**
+       * ⚠️ 环比**不插值**（`cur` 插了，这里仍用月末的两个端点）—— 这不是漏改：
+       *    环比是「本月 vs 上月」这一整月的**事实**，两个端点都已经确定了。
+       *    按进度插值只会得到「月初 0%、月末才长到真值」的锯齿，正好复现用户在
+       *    2026-09-28 明确否掉的那句「对手经常本月涨 0%」（见 `content.SAVOR_*_LINES`）。
+       *    市值可以插值（它是一个**连续的价格**），环比不可以。
+       */
+      mom: c.prev > 0 ? c.cur / c.prev - 1 : 0,
+      isNew: isNew(c),
+    };
+  });
   if (playerCap != null && playerCap > 0) {
     const prev = playerCapPrev != null && playerCapPrev > 0 ? playerCapPrev : playerCap;
     list.push({
@@ -436,6 +458,12 @@ const RANK_NARRATION = {
   2:  who => `越过了 ${who}。只差最后一个名字。`,
 };
 
+/**
+ * 播报档位，**从高到低**（10 → 5 → 3 → 2）—— 就是名次真正被跨过的顺序。
+ * 由表本身派生，所以以后加档位（例如第 20 名）不用再改 `worldTick` 里那段循环。
+ */
+const RANK_TIERS = Object.keys(RANK_NARRATION).map(Number).sort((a, b) => b - a);
+
 /** 点名用的短名：**最多 8 单位**（4 个全角字 / 8 个半角字符）—— 名字多长都不撑破那一行 */
 export function shortName(n) {
   let out = '', w = 0;
@@ -455,6 +483,29 @@ export function shortName(n) {
 export function worldTop(w) {
   let m = 0;
   for (const c of w.companies) if (c.cur > m) m = c.cur;
+  return m;
+}
+
+/**
+ * 榜首的**月内插值**（用户 2026-09-28：「回味期的数字变换不够丝滑，隔月就硬切了」）。
+ *
+ * `worldTop` 拿的是月末值（`cur`），而世界表只有「上月末 / 本月末」两个采样点
+ * ⇒ 直接用它，回味期的玩家市值（锚在榜首上，见 `worldTick`）会**每 5 真实秒跳一格**。
+ * 这里按 `progress = s.calMonth − s.world.month` 把榜首也在两个月采样点之间插出来
+ * ——`progress → 1` 给出本月末、下一月 `progress = 0` 给出同一个上月末 ⇒ 天然连续。
+ *
+ * ⚠️ 与 `worldTop` 分开写、不用 `progress = 1` 去复用：`a + (b − a) × 1` 在浮点里
+ *    不保证逐位等于 `b`，而 `worldTop` 是**不影响显示也能跑**的旧口径（探针在断言它）。
+ *
+ * @param {number} progress 月内进度 ∈ [0,1]
+ */
+export function worldTopAt(w, progress = 0) {
+  const p = Math.max(0, Math.min(1, progress));
+  let m = 0;
+  for (const c of w.companies) {
+    const v = c.prev + (c.cur - c.prev) * p;
+    if (v > m) m = v;
+  }
   return m;
 }
 
@@ -551,8 +602,21 @@ export function worldTick(s, R = null) {
    *    若让它跟着 240 个月的 `u` 衰减，就又会回到「+2 分钟 40 T」那个用户否掉的量级。
    */
   const D0 = R ? derived(s, R) : derived(s);
+  /**
+   * **月内进度**（用户 2026-09-28：「回味期的数字变换不够丝滑，隔月就硬切」）。
+   *
+   * 只在回味期非 1（正常段取 1 = 月末口径，与旧行为逐位一致、与 `render.rankBlock` 同一判据）——
+   * 正常段玩家自己的市值也踩在月度网格上（`valAt(gameMonths)`），整榜一起按月跳，没有必要也没有好处。
+   */
+  const frac = Math.max(0, Math.min(1, (s.calMonth || 0) - s.world.month));
+  const prog = s.ending ? frac : 1;
   if (s.ending) {
-    const top = worldTop(s.world);
+    /**
+     * ⚠️ 榜首取**月内插值**而不是 `worldTop`（用户 2026-09-28：「隔月就硬切」）：
+     *    玩家市值锚在榜首上，用月末值就等于把「每 5 真实秒跳一格」直接搬进 HUD。
+     *    `frac` 与 `ranking` 的 `progress` 同一个口径（见那里的长注释）。
+     */
+    const top = worldTopAt(s.world, frac);
     /**
      * ⚠️ `age` 用**小数月**（`s.calMonth`）而不是 `target`（= `gameMonths`，**整数**月）。
      *    用整数月的话 `u` 与 `gap` 在一个游戏月之内**逐位不变** ⇒ HUD 市值变成
@@ -565,6 +629,7 @@ export function worldTick(s, R = null) {
      */
     const since = s.topMonth > 0 ? s.topMonth : MONTHS_TOTAL;
     const age = Math.max(0, (s.calMonth || 0) - since);
+    // （`frac` 在上面就算好了 —— 名次那一趟也要用它，见下）
     const u = Math.min(1, age / SAVOR_RAMP_MONTHS);
     const gap = (SAVOR_GAP_MID + SAVOR_GAP_AMP * cycleAt(target)) * u;
     const own = toUSD_T(D0.marketCapBase * valAt(target));
@@ -573,7 +638,13 @@ export function worldTick(s, R = null) {
   }
 
   const cap = toUSD_T(s.ending ? s.savorCap : D0.marketCap);
-  const { all } = ranking(s.world, cap, 1e9, s.worldPrevCap ?? null);
+  /**
+   * ⚠️ 名次这一趟必须与显示层（`render.rankBlock`）用**同一个 `progress`**：
+   *    回味期玩家的锚点 `savorCap` 是插值后的榜首 + gap，若这里仍拿月末值去比，
+   *    玩家会在月中那几帧**掉到第 2 名**（实测：`savorState()` 的探针报「回味期玩家掉到第 2 名」）。
+   *    两边一起插值 ⇒ 榜首插值后的位置仍是榜首，玩家恒在它上面 `gap` 处。
+   */
+  const { all } = ranking(s.world, cap, 1e9, s.worldPrevCap ?? null, prog);
   const me = all.find(c => c.me);
   const rank = me.rank;
   const prevBest = s.worldBest || 999;
@@ -581,10 +652,26 @@ export function worldTick(s, R = null) {
   if (rank < prevBest) {
     s.worldBest = rank;
     s.worldMilestones = s.worldMilestones || [];
-    if (RANK_NARRATION[rank] && !s.worldMilestones.includes(rank)) {
-      s.worldMilestones.push(rank);
-      const passed = all.find(c => c.rank === rank + 1);
-      s.log.push(`【世界第 ${rank}】${RANK_NARRATION[rank](passed ? shortName(passed.n) : '前面那家')}`);
+    /**
+     * ⚠️ 播报**所有跨过的档位**，不是只播 `rank` 那一档（2026-09-28 修）。
+     *
+     * 旧写法 `RANK_NARRATION[rank]` 只在名次**恰好落在** 10 / 5 / 3 / 2 上时才播 ——
+     * 而名次一次掉几档是常事（准入市值差 2% 就能连跳两级），于是「越过了谁」会整段丢失。
+     * 实测（本轮加了估值噪声之后）：一整局只播了 **3 条**，`tools/probes.mjs` 那条
+     * 「名次播报点名了被超越的那一家」直接判红（它要求 ≥4 条，四个档一条不少）。
+     * 改成「凡 `rank <= t < prevBest` 的档位逐个补播」（从高到低，与真正跨过的顺序一致），
+     * 判据是**棘轮区间**而不是等值 ⇒ 无论一次掉几档都不会漏。
+     *
+     * ⚠️ 被点名的那一家取**此刻** `t + 1` 位的公司。跳档时它不是当年真的压在我们头上的那一家
+     *    （那个中间态没有被记录下来），但它是「现在我们这个位置下面紧贴着的那家」——
+     *    在这句话的语义里（「越过了 X」）是成立的，而且不需要为了它去存一列中间快照。
+     */
+    for (const t of RANK_TIERS) {
+      if (!(rank <= t && t < prevBest)) continue;
+      if (s.worldMilestones.includes(t)) continue;
+      s.worldMilestones.push(t);
+      const passed = all.find(c => c.rank === t + 1);
+      s.log.push(`【世界第 ${t}】${RANK_NARRATION[t](passed ? shortName(passed.n) : '前面那家')}`);
     }
     /**
      * **决胜回执**（用户 2026-09-27：「可以在减速开始时给一条日志回执」）——

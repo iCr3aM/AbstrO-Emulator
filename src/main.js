@@ -9,7 +9,7 @@
 
 import { createState } from './core/state.js';
 import { save, load, applyOffline, wipe, disableSave } from './core/save.js';
-import { createLoop, tick, resolvePending, manualBuy } from './core/engine.js';
+import { createLoop, tick, resolvePending, manualBuy, isSprint } from './core/engine.js';
 import { deliverOrder } from './core/orders.js';
 import { rates } from './core/economy.js';
 import { evaluateRetirement } from './core/endings.js';
@@ -73,15 +73,36 @@ try {
 // 第一帧之前先跑一次 dt = 0 的 tick：建世界表、写进度钟、发第 1 年的年报。
 try { tick(s, 0); } catch (err) { fatal('初始化', err); }
 
+/**
+ * **操作锁**：回味期 ∪ 冲刺段（第 8 章起）。
+ * ===========================================================
+ * 用户 2026-09-28：「最后的登顶有点太慢了（而且登顶之前玩家还要操作去点其他 tab，
+ * 看不到市值榜。如何合理修改？我感觉也可以改为类似回味期一样，登顶前无法操作，但是能选择加速）」。
+ *
+ * 第 8 章本来就已经是挂机段（`AUTO_DECIDE_STAGE = 7` ⇒ 没有年度决策；投资线与订单
+ * 由自动购买 / 自动交付包办，`check --idle` 零决策照样通关）⇒ 锁住的不是玩法，
+ * 而是「必须自己去点 tab 才看得到市值榜」这层摩擦。
+ *
+ * ⚠️ 渲染层已经把那些按钮画成 `disabled`（`bind.js` 的派发会跳过 disabled 元素），
+ *    这里是**第二道闸**：DOM 是一帧前的残影时也拦得住。两处判据都用 `isSprint`，不许各写一份。
+ * ⚠️ **`speed` 不在锁里** —— 那正是「能选择加速」这条需求本身。
+ * ⚠️ **模拟本身不看这把锁**（`engine.tick` 没有它）：锁的是玩家的手，无头工具照旧跑满。
+ */
+const locked = () => s.ending || isSprint(s);
+
 const handlers = {
   /** 手动点击 = 立即买下你点的那一条（与自动购买同一个函数，一次两级） */
-  buy(id) { if (manualBuy(s, id)) { play('buy', s.sfx); draw(); } },
+  buy(id) { if (locked()) return; if (manualBuy(s, id)) { play('buy', s.sfx); draw(); } },
 
   /** 交付一条订单（准时 ×1.0；到期未点由引擎按 ×0.9 自动交付） */
-  order(uid) { if (deliverOrder(s, Number(uid), rates(s))) { play('order', s.sfx); save(s); draw(); } },
+  order(uid) {
+    if (locked()) return;
+    if (deliverOrder(s, Number(uid), rates(s))) { play('order', s.sfx); save(s); draw(); }
+  },
 
   /** 结算一条待决事件 */
   opt(arg) {
+    if (locked()) return;
     const [uid, i] = String(arg).split(':');
     if (resolvePending(s, Number(uid), Number(i), rates(s))) { play('opt', s.sfx); save(s); draw(); }
   },
@@ -102,8 +123,9 @@ const handlers = {
   },
 
   settings() { play('ui', s.sfx); renderSettings(overlay, s); },
+  /** ⚠️ **加速不在锁里** —— 用户要的正是「登顶前无法操作，但是能选择加速」 */
   speed(v) { play('ui', s.sfx); s.speed = Number(v) || 1; draw(); },
-  tab(i) { play('ui', s.sfx); setTab(i); draw(); },
+  tab(i) { if (locked()) return; play('ui', s.sfx); setTab(i); draw(); },
 
   /**
    * 点开世界市值榜的**一行**看公司详情（行业 / 国家 / 入场年份）。
