@@ -14,7 +14,7 @@
 
 import {
   ACTS, PENDING_CAP, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, MILESTONES,
-  AUTO_DECIDE_STAGE,
+  AUTO_DECIDE_STAGE, DIL_MIN, DIL_AT,
   eventsFor, eventById, companyName,
 } from './content.js';
 import { rates, derived, purchase, lowestLine, costFor, spendableOf } from './economy.js';
@@ -132,7 +132,13 @@ export function resolvePending(s, uid, optIndex, R = rates(s)) {
     const opt = ev.options[optIndex] || ev.options[ev.default] || ev.options[0];
     applyEffect(s, opt.eff, R);
     s.decisions += 1;
-    s.log.push(`【决策】${ev.title} → ${opt.text}`);
+    /**
+     * ⚠️ 只写「选了什么」，**不写事件标题**（2026-09-27）。
+     *    原来是 `【决策】<标题> → <选项>`，最长一条实测 60 单位 ≈ 420px —— 手机日志栏
+     *    只有 366px，注定折行。而标题是**提问**、选项是**答案**，日志记的是答案；
+     *    提问当时就在「公司」页的待决卡片上（`render.pendingCard`），再抄一遍是冗余。
+     */
+    s.log.push(`【决策】${opt.text}`);
   }
   return true;
 }
@@ -176,7 +182,8 @@ function annualReport(s, R, D) {
     const opt = ev.options[ev.default];
     applyEffect(s, opt.eff, R);
     s.autoDecided += 1;
-    s.log.push(`${tag}${ev.title} → ${opt.text}`);
+    // 同上：只留「答案」。`【20xx 年】` 这个标签本身已经说明「这一年做了一次决策」。
+    s.log.push(`${tag}${opt.text}`);
     return;
   }
 
@@ -258,6 +265,22 @@ function advanceStage(s, D) {
   return true;
 }
 
+// ─────────────────────────── 决胜段减速 ───────────────────────────
+/**
+ * 决胜段减速因子 —— 乘在 `s.speed` **之外**（见 `content.DIL_MIN` 的整段推演）。
+ * `worldBest` 越小越慢：`DIL_AT` 名开外 = 1（不减速），第 1 名 = `DIL_MIN`（最慢）。
+ *
+ * ⚠️ 键取**名次**而不是「与榜首的差距」：差距每月都在变（世界榜有月度噪声），
+ *    速度会跟着抖；名次是**单调只减不增**的量，玩家体感是「越往上越沉」。
+ * ⚠️ 它是纯函数、不写状态 ⇒ 存档/读档/无头工具三处结果一致。
+ * @returns {number} ∈ [DIL_MIN, 1]
+ */
+export function dilate(s) {
+  const b = s.worldBest ?? Infinity;
+  const w = Math.max(0, Math.min(1, (DIL_AT + 1 - b) / DIL_AT));   // 10 名 → 0.1；1 名 → 1
+  return 1 - (1 - DIL_MIN) * w;
+}
+
 // ─────────────────────────── tick ───────────────────────────
 /**
  * @param {object} s   状态
@@ -270,7 +293,11 @@ export function tick(s, dtReal = 0.1) {
    */
   if (s.ending) return { R: rates(s), D: derived(s) };
 
-  const dt = dtReal * (s.speed || 1);
+  /**
+   * 真实秒 → 游戏秒：倍速 × **决胜段减速**（`dilate` 乘在 `s.speed` 之外 ⇒ 玩家关不掉）。
+   * `s.elapsed` 仍只记真实秒（缩放的是游戏进程，不是这局玩了多久）。
+   */
+  const dt = dtReal * (s.speed || 1) * dilate(s);
 
   // ① 生产
   let R = rates(s);
@@ -304,7 +331,9 @@ export function tick(s, dtReal = 0.1) {
   // 登顶 = 唯一结局的判据（`worldRank` 由 world.js 维护，这里不另算一遍）
   if (!s.ending && s.worldRank === 1) {
     s.ending = 'top';
-    s.log.push(`【登顶】${companyName(isListed(s))} 成了世界第一。上面没有人了。`);
+    // ⚠️ 不再接「上面没有人了。」—— 同一局的名次播报（`【世界第 1】`）已经说了这一句，
+    //    两条紧挨着出现是同一件事说两遍（用户 2026-09-27「事件描述避免重复」）。
+    s.log.push(`【登顶】${companyName(isListed(s))} 成了世界第一。`);
   }
 
   if (s.log.length > LOG_MAX) s.log.splice(0, s.log.length - LOG_MAX);

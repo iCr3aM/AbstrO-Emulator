@@ -73,6 +73,7 @@ import {
   valAt, winterAt, cycleAt, VAL_CYCLE_AMP, COST_CYCLE_AMP, CYCLE_MONTHS, ORDER_TIERS,
   FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, lineName,
   AUTO_BUY_RESERVE, AUTO_BUY_RESERVE_EARLY, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, AUTO_DECIDE_STAGE,
+  DIL_MIN, DIL_AT,
 } from '../src/core/content.js';
 import {
   rates, derived, costOf, costFor, purchase, lineLevel, manualCostOf, canAffordManual,
@@ -85,7 +86,7 @@ import {
 } from '../src/core/orders.js';
 import {
   tick, pendingEvent, resolvePending, applyEffect, stageGoalMet, offlineRun, LOG_MAX,
-  manualBuy,
+  manualBuy, dilate,
 } from '../src/core/engine.js';
 import { ROUNDS, isListed } from '../src/core/finance.js';
 import { ENDING_TEXT, evaluateRetirement } from '../src/core/endings.js';
@@ -221,6 +222,13 @@ function logCapDelta(s, eff) {
  */
 function play(strategy = 'best', maxSeconds = 60 * 3600) {
   const s = createState();
+  /**
+   * 一局**全量**日志（`s.log` 会被 `LOG_MAX` 裁到 120 条，最前面那几十条会掉）。
+   * 宽度闸门要的是「这一局到底写过多宽的行」，被裁掉的那部分同样算数 ⇒ 在 push 上接一层。
+   */
+  const allLogs = [];
+  const rawPush = s.log.push.bind(s.log);
+  s.log.push = (...xs) => { allLogs.push(...xs); return rawPush(...xs); };
   const STEP = 1;
   let t = 0;
   /**
@@ -264,7 +272,7 @@ function play(strategy = 'best', maxSeconds = 60 * 3600) {
     const k = logCapDelta(s, ev.options[0].eff) >= logCapDelta(s, ev.options[1] && ev.options[1].eff) ? 0 : 1;
     resolvePending(s, s.pending[0].uid, k, rates(s));
   }
-  return { s, seconds: t, marks, caps };
+  return { s, seconds: t, marks, caps, allLogs };
 }
 
 /* ── 一次真跑，多条探针共用（跑一局 ≈1s，跑两次太浪费）── */
@@ -1278,6 +1286,98 @@ probe('周期播报一行放得下（每条 ≤ 46 单位 —— 手机日志栏
   }
   const max = Math.max(...all.map(units));
   return `${cyc.length} 条周期 + ${MILESTONES.length} 条里程碑 · 最长 ${max}/46 单位（≈${Math.round(max * 7)}px）`;
+});
+
+probe('一局全量日志：除推幕行外每一条都放得下（≤ 46 单位）', () => {
+  /**
+   * 上面那条只守「周期播报 + 里程碑」这一类；本条把**一局跑出来的全部日志**都过一遍
+   * （含 `【决策】/【年终】/【改名】/【世界第 N】/【登顶】` 等等）。
+   *
+   * ⚠️ 必须用 `A.allLogs`（`play()` 里挂的**全量**捕获），不能用 `A.s.log`：
+   *    后者被 `LOG_MAX = 120` 裁过，一局 184 条里最前面那几十条已经掉出数组了
+   *    —— 上一版普查正是因此漏掉了 `【决策】`（那几条全在早期）。
+   * ⚠️ 推幕行**排除在外**：它带 `20xx年` 年份前缀，自己有一条 48 单位预算的闸门
+   *    （见上面「推幕行」那条），两条闸门各守各的，不重复卡。
+   */
+  const over = A.allLogs
+    .filter(t => !/^\d{4}\s*年【/.test(t))
+    .map(t => [units(t), t])
+    .filter(([n]) => n > 46)
+    .sort((a, b) => b[0] - a[0]);
+  need(over.length === 0, `${over.length} 条超 46 单位，最长 ${over[0] && over[0][0]}：`
+    + over.slice(0, 3).map(([n, t]) => `\n      ${n} ${t}`).join(''));
+  const max = Math.max(...A.allLogs.filter(t => !/^\d{4}\s*年【/.test(t)).map(units));
+  return `全量 ${A.allLogs.length} 条（推幕行 ${A.allLogs.length - A.allLogs.filter(t => !/^\d{4}\s*年【/.test(t)).length} 条另计）· 最长 ${max}/46 单位`;
+});
+
+// ═══════════════════════════ 决胜段减速（用户 2026-09-27）═══════════════════════════
+
+probe(`决胜段减速：${DIL_AT} 名开外不减速、第 1 名 ×${DIL_MIN}、单调不回头`, () => {
+  /**
+   * 纯函数，直接按定义量三个性质：
+   *   ① 迟滞段（名次 > DIL_AT）必须是 **1** —— 否则整局都被拖慢，`check` 的八章全崩；
+   *   ② 第 1 名必须是 **`DIL_MIN`** —— 这是用户拍板的档位；
+   *   ③ **单调**：名次越小因子越小（玩家体感「越往上越沉」），不许有反弹。
+   *   另外把「没进过榜」的初始态（`worldBest` 为空）也算一遍 —— 它必须等于 1。
+   */
+  const f = r => dilate({ worldBest: r });
+  need(f(undefined) === 1, `未进榜时 dilate=${f(undefined)}，应为 1`);
+  for (const r of [DIL_AT + 1, DIL_AT + 2, 50, 999]) {
+    need(f(r) === 1, `第 ${r} 名 dilate=${f(r)}，迟滞段应为 1`);
+  }
+  need(Math.abs(f(1) - DIL_MIN) < 1e-9, `第 1 名 dilate=${f(1)}，应为 DIL_MIN=${DIL_MIN}`);
+  let prev = Infinity;
+  for (let r = DIL_AT + 2; r >= 1; r--) {
+    const v = f(r);
+    need(v <= prev + 1e-12, `名次 ${r} 的因子 ${v} 大于第 ${r + 1} 名的 ${prev} —— 减速带不单调`);
+    need(v <= 1 + 1e-12 && v >= DIL_MIN - 1e-12, `名次 ${r} 的因子 ${v} 跑出 [${DIL_MIN}, 1]`);
+    prev = v;
+  }
+  return `${DIL_AT} 名外 ×1 · 第 ${DIL_AT} 名 ×${f(DIL_AT).toFixed(3)} · 第 1 名 ×${f(1)} · 全程单调`;
+});
+
+probe('决胜回执「【决胜】时间放慢」一局恰好一次，且落在首次进前 DIL_AT', () => {
+  /**
+   * 回执由 `world.worldTick` 写：「上一次还没进 DIL_AT、这一次进了」——
+   * `worldBest` 只减不增，这个条件一生只成立一次，所以不需要额外的去重字段。
+   * 探针守两件事：**条数恰好 1**（既不少报、也不重复刷屏），**位置紧跟那条名次播报**。
+   */
+  const hits = A.allLogs.filter(t => /^【决胜】/.test(t));
+  need(hits.length === 1, `一局出现 ${hits.length} 条【决胜】，应为 1 条`);
+  const rankLine = A.allLogs.find(t => t.startsWith(`【世界第 ${DIL_AT}】`));
+  need(rankLine, `日志里没有【世界第 ${DIL_AT}】—— 回执落点无从对照`);
+  const iHit = A.allLogs.findIndex(t => /^【决胜】/.test(t));
+  const iRank = A.allLogs.indexOf(rankLine);
+  need(iHit >= iRank, `【决胜】出现在【世界第 ${DIL_AT}】之前 —— 减速还没开始就报了`);
+
+  /**
+   * 着色：`【决胜】` 必须进 `render.LOG_TAGS` 且**复用 `.li.top`**（与【登顶】同色）。
+   * 漏登记的后果是这一行掉回兜底灰 —— 与推幕行丢 `.li.act` 是同一种静默失败。
+   */
+  const s = midState(1, 60);                              // 需带 world 的态，`createState()` 裸态渲染会抛错
+  s.log = ['【决胜】时间放慢。'];
+  lookTab(s, TAB_FOUNDER);
+  need(root.innerHTML.includes('class="li top"'), '【决胜】没有着色为 .li.top —— LOG_TAGS 里漏登记了？');
+  setTab(TAB_FOUNDER);
+  return `1 条 · 紧跟在「${rankLine}」之后 · 着色 .li.top`;
+});
+
+probe('名次播报点名了被超越的那一家', () => {
+  /**
+   * 用户 2026-09-27「让玩家有慢慢超越的感觉」：`RANK_NARRATION` 由「我们排第几」
+   * 改成**点名**「越过了 X」。X 取的是 `ranking().all` 里紧贴我们下面那一家（`rank + 1`），
+   * 且过 `shortName()` 截到 **8 单位**（名字多长都不撑破那一行）。
+   */
+  const lines = A.allLogs.filter(t => /^【世界第 \d+】/.test(t));
+  need(lines.length >= 4, `一局只抓到 ${lines.length} 条名次播报 —— 样本不足`);
+  for (const t of lines) {
+    const body = t.slice(t.indexOf('】') + 1);
+    if (/上面没有人了/.test(body)) continue;              // 第 1 名那条不点名（没有「上面那家」）
+    need(/^越过了 [^。]+。/.test(body), `没点名：${t}`);
+    const who = body.slice(3, body.indexOf('。'));
+    need(units(who) <= 8, `点名用了 ${units(who)} 单位（上限 8）：${t}`);
+  }
+  return `${lines.length} 条名次播报 · 点名均 ≤ 8 单位`;
 });
 
 // ═══════════════════════════ §1.7 离线结算 ═══════════════════════════

@@ -87,7 +87,7 @@ export function financeTick(s, R, D) {
     if (r.pe) s.mod.pe += r.pe;
     s.log.push(`【${r.name}】到账 ¥${fmtShort(got)}（${r.investor || '公开发行'}）`);
     if (r.id === 'ipo') {
-      s.log.push(`【改名】${companyName(false)} 从今天起叫 ${companyName(true)} —— 招股书第一页，印的是出租屋那张桌子。`);
+      s.log.push(`【改名】${companyName(false)} 改名 ${companyName(true)}。`);
     }
   }
 }

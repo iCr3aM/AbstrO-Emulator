@@ -13,6 +13,7 @@
 import { TOP100, IPO_POOL, DARK_HORSES, ALPHA, SECTOR_LABEL } from './world-data.js';
 import { gameMonths } from './format.js';
 import { derived } from './economy.js';
+import { DIL_AT } from './content.js';
 
 /** 世界起点：2026 年 9 月（= 游戏开局） */
 export const WORLD_START_YEAR = 2026;
@@ -435,14 +436,31 @@ export function cycleNotes(from, to, w) {
 /**
  * 跨越名次时的叙事日志。只跨这几个门槛才记一条 ——
  * 每月可能因为股价噪声反复换位，全写会刷屏；这几个门槛一生只有一次。
+ *
+ * 2026-09-27（用户「让玩家有慢慢超越的感觉」）：从「我们排第几」改成**点名** ——
+ * 每一条都说出**越过了谁**。这正是「超越」这件事的节拍器，而原来的文案里没有人名。
+ * 越过的就是此刻紧贴我们下面那一家（`rank + 1`）—— 上月末它还压在我们头上。
+ * ⚠️ 名字必须截到 **8 单位**以内（`shortName`）：`【世界第 10】` 这个前缀已占 13 单位，
+ *    再顶一个长公司名，整行就过 46 单位的死线（手机日志栏 366px，见 `cycleNotes` 上方说明）。
  */
 const RANK_NARRATION = {
-  10: '第一次有媒体把你们排进世界前十的那张表格。',
-  5: '世界前五。老钟把榜单截图发到了三个人的群里。',
-  3: '前三。评论区有人问：这家公司是哪儿来的。',
-  2: '第二。离最上面那个名字，只差一行。',
-  1: '第一。上面没有人了。',
+  10: who => `越过了 ${who}。第一次进前十。`,
+  5:  who => `越过了 ${who}。老钟截了图发群里。`,
+  3:  who => `越过了 ${who}。有人在问这是谁。`,
+  2:  who => `越过了 ${who}。只差最后一个名字。`,
+  1:  ()  => '上面没有人了。',
 };
+
+/** 点名用的短名：**最多 8 单位**（4 个全角字 / 8 个半角字符）—— 名字多长都不撑破那一行 */
+function shortName(n) {
+  let out = '', w = 0;
+  for (const c of n) {
+    const u = c.charCodeAt(0) > 0xff ? 2 : 1;
+    if (w + u > 8) break;
+    out += c; w += u;
+  }
+  return out;
+}
 
 /**
  * 每帧调用：把世界推进到当前游戏月份，并结算「我们排第几」。
@@ -513,8 +531,19 @@ export function worldTick(s, R = null) {
     s.worldMilestones = s.worldMilestones || [];
     if (RANK_NARRATION[rank] && !s.worldMilestones.includes(rank)) {
       s.worldMilestones.push(rank);
-      s.log.push(`【世界第 ${rank}】${RANK_NARRATION[rank]}`);
+      const passed = all.find(c => c.rank === rank + 1);
+      s.log.push(`【世界第 ${rank}】${RANK_NARRATION[rank](passed ? shortName(passed.n) : '前面那家')}`);
     }
+    /**
+     * **决胜回执**（用户 2026-09-27：「可以在减速开始时给一条日志回执」）——
+     * `dilate()` 的减速权重 `w` 正是在 `worldBest` 首次 ≤ `DIL_AT` 时脱离 0，
+     * 所以「减速开始」的字面位置就是这里。
+     * ⚠️ **只报一次**：`worldBest` 只减不增 ⇒「上一次还没进、这一次进了」这个条件
+     *    一生只成立一次，不需要新增去重字段。
+     * ⚠️ 它与 `【世界第 10】` 会落在同一个月。两条说的不是一件事（「进了前十」vs「接下来会变慢」），
+     *    日志栏 132px 放得下相邻两条。
+     */
+    if (prevBest > DIL_AT && rank <= DIL_AT) s.log.push('【决胜】时间放慢。');
   }
   /**
    * 名次落库（2026-09-26 精简）：每 150ms 重绘一次，若在渲染层现算 `ranking`
