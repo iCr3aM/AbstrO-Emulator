@@ -112,6 +112,33 @@ for (const vp of VIEWPORTS) {
       }
     };
 
+    /**
+     * HUD 四格**必须等高、且不随文字变化**（用户 2026-09-27：「现金那一格会随文字变化跳动
+     * 格子高度……我要确保所有的框都是固定的」）。
+     * 光量「当前高度」抓不住这个 bug（两帧都是短数字，看不出来），所以量两次：
+     *   ① 当前高度 —— 四格必须**全等**。现金格有 4 行（可动用 / 储备 各一行），其余三格 3 行，
+     *      靠 `.hud .cell` 的固定高度对齐；没有它，同一 grid 行被最高的那格撑开。
+     *   ② 把每个数值行 / 副行换成**最长的现实文本**（`¥2500.00万亿`）后再量 —— 高度必须一模一样。
+     *      这条才是真断言：格子一旦跟着字数长高，这里立刻红。
+     * ⚠️ 只塞 `b` / `u`，不碰 `i`：标签行没有 `nowrap`，塞超长串会自己折行，那是假阳性。
+     */
+    const hudCells = await page.evaluate(() => {
+      const cells = [...document.querySelectorAll('.hud .cell')];
+      const before = cells.map(c => Math.round(c.getBoundingClientRect().height));
+      for (const el of document.querySelectorAll('.hud .cell b')) el.textContent = '¥2500.00万亿';
+      for (const el of document.querySelectorAll('.hud .cell u')) el.textContent = '可动用 ¥2500.00万亿';
+      const after = cells.map(c => Math.round(c.getBoundingClientRect().height));
+      return { before, after };
+    });
+    if (hudCells.before.length !== 4) {
+      console.log(`  ❌ HUD 格数不是 4（量到 ${hudCells.before.length}）`); fails++;
+    } else if (new Set(hudCells.before).size !== 1) {
+      console.log(`  ❌ HUD 四格高度不一致：${hudCells.before.join(' / ')}`); fails++;
+    }
+    if (hudCells.before.join() !== hudCells.after.join()) {
+      console.log(`  ❌ HUD 高度随文字变长而变：${hudCells.before.join('/')} → ${hudCells.after.join('/')}`); fails++;
+    }
+
     for (const tb of TABS) {
       // ⚠️ 不能用 `page.click()`：本页每 150ms 整页重建一次，元素随时可能被换掉。
       //    直接派发 `pointerdown`（`bind.js` 的 `PRIMARY_EVENT`）最稳。
@@ -133,7 +160,10 @@ for (const vp of VIEWPORTS) {
       const layout = await page.evaluate(() => {
         const wrap = [];
         const horiz = [];
-        for (const el of document.querySelectorAll('.tag, .line .btn, .order .btn, .hud .cell, .cost, .ic, .tab')) {
+        // ⚠️ HUD 不量「整格行数」—— 一格本来就有 3–4 行，量整格永远是「折行」。
+        //    HUD 改量**每一行**（`b` / `u` 各是一个行盒）；整格等高与「不许随字数长高」
+        //    由上面的 hudCells 两次测量负责。
+        for (const el of document.querySelectorAll('.tag, .line .btn, .order .btn, .hud .cell b, .hud .cell u, .cost, .ic, .tab')) {
           const cs = getComputedStyle(el);
           const contentH = el.clientHeight
             - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)

@@ -114,8 +114,20 @@ html, body {
   padding-top: 12px;
   margin-bottom: 12px;
 }
+/*
+ * ⚠️ **四格高度锁死**（用户 2026-09-27：「现金那一格会随文字变化跳动格子高度……我要确保
+ *    所有的框都是固定的」）。根因是 HUD 走 grid，同一行里**谁最高谁说了算** —— 只要有一格
+ *    多折出一行，整行两个框都被撑高，下一帧数字位数变了又缩回去。
+ * 预算 = **4 行**：标签行 11px×1.5 = 16.5 ＋ 数值行 15px×1.5 = 22.5 ＋ 副行 ×2 = 33
+ *                   ⇒ 内容 72 ＋ padding 8×2 ＋ border 1×2 = **90px**。
+ * 现金格正好 4 行（可动用 / 储备 各一行）；其余三格 3 行，多出的 16.5px 是**故意留白**，
+ * 换来的是「数字怎么涨，框都不动」。`overflow: hidden` 是兜底：真有 5 行的极端情况宁可裁掉，
+ * 也不许把整块 HUD 顶开（`.hud .cell b` 已强制单行，见下 —— 实际到不了那一步）。
+ */
 .hud .cell {
   display: block;
+  height: 90px;
+  overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--line);
   padding: 8px 12px;
@@ -123,12 +135,22 @@ html, body {
 /* 标签行：一格可以有两段（左标签 · 右速率）—— flex 让第二段贴住右边缘 */
 .hud .cell i { display: flex; justify-content: space-between; font-style: normal; font-size: 11px; color: var(--mut); }
 .hud .cell i em { font-style: normal; }
-.hud .cell b { display: block; font-size: 15px; font-weight: 600; word-break: break-all; }
-.hud .cell u { display: block; text-decoration: none; font-size: 11px; color: var(--mut); }
-/* 目标达成：**不打钩**（用户 2026-09-27）—— 目标文字用方框高亮，标题行右端贴边写「完成」。
-   `b.done` 由块级退成 `inline-block`，方框才**贴着词**而不是拉满整格。 */
+/* 数值行**恒一行**：`nowrap + ellipsis` 顶掉原来的 `word-break: break-all` ——
+   后者让 `¥2500.00万亿` 这类长数字可以任意断开，正是格子被撑高的入口。 */
+.hud .cell b {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud .cell u { display: block; text-decoration: none; font-size: 11px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 目标达成：**不打钩**（用户 2026-09-27）—— 目标文字转绿，标题行右端贴边写「完成」。
+   ⚠️ 原来是**绿框**（`border` + `padding` 横向多占 14px）—— 用户 2026-09-27 二次修订：
+      「绿色框加了现在会换行」⇒ **去掉框，只留颜色**。框一去掉，这一行也回到单行，不再顶高格子。 */
 .hud .cell i em.ok { color: var(--ok); }
-.hud .cell b.done { display: inline-block; border: 1px solid var(--ok); color: var(--ok); padding: 0 6px; }
+.hud .cell b.done { color: var(--ok); }
 /* 一格装两栏（左净利率 · 右世界排名）：两个 half 并排，各自内部照旧 i/b/u 竖排 */
 .hud .cell .half { display: inline-block; vertical-align: top; width: 48%; }
 .hud .cell .half + .half { text-align: right; }

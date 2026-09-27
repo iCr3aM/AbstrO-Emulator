@@ -111,14 +111,19 @@ const rankText = r => (r <= RANK_MAX ? String(r) : `>${RANK_MAX}`);
  * 「现金」与「现金储备」是**同一格的两行**（用户 2026-09-27）—— 账上那笔钱只有一部分能动：
  * 储备金 = `现金 × RESERVE_FRAC`（`economy.spendableOf`）。口径取**甲**：
  * **大字放现金总额**（对上 GDD §1.2 的「现金及等价物」，与「年营收 3.31 万亿」同量级可对照），
- * 副行写「可动用 ¥X ｜ 储备 ¥Y」—— 因为 `rf = 0.80` 时储备是可动用的 4 倍，
+ * 副行**分两行**写「可动用 ¥X」/「储备 ¥Y」—— 因为 `rf = 0.80` 时储备是可动用的 4 倍，
  * 旧版「大字放可动用」会让副行数字反超大字，读起来别扭。
+ * ⚠️ 副行原来是**一行**「可动用 ¥X ｜ 储备 ¥Y」（用户 2026-09-27 反馈：现金格会随文字跳动
+ *    格子高度）—— 两个金额位数一变（`¥432万` → `¥2500.00万亿`），这一行就在 1 行 / 2 行
+ *    之间来回折，同一 grid 行被撑高，整块 HUD 跟着跳。拆成两个 `<u>` 后**恒 4 行**。
+ *    第三、四格本来就是 3 行，`style.css` 里 `.hud .cell` 按 4 行预算锁死高度，四格同高。
  * 三位创始人的年龄挂在目标格的副行（他们不进任何公式，只是叙事）。
  *
- * 目标达成的表现是**方框高亮 + 标题行右端写「完成」**，**不打钩**（用户 2026-09-27）：
- * 打钩只是给词尾缀了一个符号，方框则把「这一条已经跨过」摊在整个词上 —— 一眼就能扫到。
- * 未达成时**什么都不加**（原来那个 `·` 与 `✓` 是同一个三元表达式，去掉 `✓` 之后
- * 孤零零一个中点反而像排错；「方框有没有」本身就是达成与否的信号）。
+ * 目标达成的表现是**目标文字转绿 + 标题行右端写「完成」**，**不打钩**（用户 2026-09-27）：
+ * 打钩只是给词尾缀了一个符号，转绿则把「这一条已经跨过」摊在整个词上 —— 一眼就能扫到。
+ * ⚠️ 原来是**绿框**（`border` + `padding` = 横向多占 14px），会把「完成 Pre-IPO 轮」这类
+ *    长目标挤成两行、格子高度又跳（用户 2026-09-27 二次修订：**去掉框，只留颜色**）。
+ * 未达成时**什么都不加**（「颜色变没变」本身就是达成与否的信号）。
  */
 function hud(s, R, D) {
   const a = ACTS[s.stage] || ACTS[1];
@@ -135,7 +140,7 @@ function hud(s, R, D) {
   const ranked = listed ? (r && r <= RANK_MAX ? `#${r}` : `>${RANK_MAX}`) : '—';
   return `
   <div class="hud">
-    <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)} ｜ 储备 ¥${fmt(D.reserve)}</u></span>
+    <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
     <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u></span>
     <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u></span><span class="half"><i>世界</i><b>${ranked}</b><u>${listed ? '已上市' : '未上市'}</u></span></span>
     <span class="cell"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
