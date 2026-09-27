@@ -2058,40 +2058,53 @@ probe('回味期：读档不回退日历（离线多久都不许把它拽回正�
   return `日历 ${m.toFixed(1)} 月 · 世界 ${world} 月 —— 离线 30 天一格不动`;
 });
 
-probe('回味期：日志栏每月恰好一条市场快讯（无年报 / 订单 / 里程碑噪声）', () => {
+probe('回味期：日志栏每月恰好一条市场快讯（里程碑额外插入，别的噪声一个不许有）', () => {
   const s = savorState();
   s.log.length = 0;                                       // 清空，只看回味期写了什么
-  const byMonth = new Map();
-  const seen = [];
+  const rows = [];                                        // 每一条新日志 + 它落下的那个游戏月
   const startM = gameMonths(s);
-  let prevM = startM;
   for (let i = 0; i < 150; i++) {                         // 150 真实秒 = 30 游戏月
     const len = s.log.length;
     tick(s, 1, true);
     const m = gameMonths(s);
-    if (m > prevM) {
-      byMonth.set(m, (byMonth.get(m) || 0) + (s.log.length - len));
-      for (const t of s.log.slice(len)) seen.push(t);
-      prevM = m;
-    }
+    for (const t of s.log.slice(len)) rows.push({ m, t });
   }
+  /**
+   * ⚠️ 2026-09-28 起日志栏**不再只有快讯**：回味期补的九条里程碑（30~110 万亿）也会插进来。
+   *    所以先把里程碑行摘出来单独审，剩下的才按「每月恰好一条」数。
+   * ⚠️ 收集口径也一并改了：★ 旧版只在**跨月那一帧**取样，而里程碑是**按市值跨档**落的 ——
+   *    它可能落在月中任何一帧（实测第一次跨档就落在月中），那种行会被旧口径整条漏掉。
+   *    现在改成**每帧都收**，行上带一个「它落下时的游戏月」。
+   */
+  const mileIdx = new Map(MILESTONES.map((m, i) => [m.text, i]));
+  const news = rows.filter(r => !mileIdx.has(r.t));
+  const miles = rows.filter(r => mileIdx.has(r.t)).map(r => r.t);
+  const byMonth = new Map();
+  for (const r of news) byMonth.set(r.m, (byMonth.get(r.m) || 0) + 1);
   // ⚠️ 用**实得的**月数当期望值：150 次浮点加法未必正好落满 30 个月（差一个 ULP 就少一个月）
   const expect = gameMonths(s) - startM;
   need(byMonth.size === expect, `${expect} 个游戏月只落了 ${byMonth.size} 个月的快讯`);
-  need(seen.length === expect, `快讯条数 ${seen.length} ≠ 月数 ${expect}`);
+  need(news.length === expect, `快讯条数 ${news.length} ≠ 月数 ${expect}`);
   const bad = [...byMonth.entries()].filter(([, v]) => v !== 1);
   need(bad.length === 0,
     `有话月份不是恰好一条：${bad.map(([m, v]) => `${m} 月 ×${v}`).join(' ')}`);
+  const seen = rows.map(r => r.t);
   // 静音也算：订单是自动交付的、年度报告还在跑，一个都不许漏进日志
   const noise = seen.filter(t => /^【订单|^【决策|^【世界第|^【决胜|^\d{4}\s*年【/.test(t));
   need(noise.length === 0, `回味期日志里混进了非市场文案：${noise[0]}`);
   const ns = seen.find(t => typeof t !== 'string');
   need(ns === undefined, `回味期日志里出现了非字符串条目：${JSON.stringify(ns)}`);
+  // 里程碑：这一段（30 个月）必须**真的触发过**，否则说明它又被静音吞了
+  need(miles.length >= 1, `30 个游戏月里一条里程碑都没触发（回味期里程碑没生效）`);
+  need(new Set(miles).size === miles.length, `里程碑重复：${miles.find((t, i) => miles.indexOf(t) !== i)}`);
+  for (let i = 1; i < miles.length; i++) {
+    need(mileIdx.get(miles[i]) > mileIdx.get(miles[i - 1]), `里程碑没有按档位递增：${miles[i]}`);
+  }
   const over = seen.filter(t => units(t) > 46);
   need(over.length === 0,
-    `有 ${over.length} 条快讯超过 46 单位${over.length ? `：${over[0]}（${units(over[0])}）` : ''}`);
-  need(s.log.length === seen.length, '日志条数与逐月增量对不上（有别的路径在写）');
-  return `${expect} 个月 × 1 条 · 最长 ${Math.max(...seen.map(units))}/46 单位`;
+    `有 ${over.length} 条超过 46 单位${over.length ? `：${over[0]}（${units(over[0])}）` : ''}`);
+  need(s.log.length === seen.length, '日志条数与逐条增量对不上（有别的路径在写）');
+  return `${expect} 个月 × 1 条快讯 + ${miles.length} 条里程碑 · 最长 ${Math.max(...seen.map(units))}/46 单位`;
 });
 
 probe('两步删档：第一次只改文案，第二次才真删', () => {
@@ -2378,17 +2391,37 @@ probe('曲线目标与内容表一致：八章门槛严格递增、五条线共�
     need(ACTS[a + 1].mcap > ACTS[a].mcap, `第 ${a} 章门槛没有严格递增`);
   }
   need(ACTS[8].mcap / ACTS[1].mcap > 1e6, `八章跨度太小（${(ACTS[8].mcap / ACTS[1].mcap).toExponential(2)}）`);
-  // 里程碑：严格递增、全部在前七章之内（第 8 章只留「登顶」一件事）
+  /**
+   * 里程碑严格递增，并**按触发时期分两段**（2026-09-28 拓展后）：
+   *   · 正篇八条 —— 门槛全部**低于**第 8 章门槛（第 8 章只留「登顶」一件事）；
+   *   · 回味期九条 —— 门槛全部**高过**它（正篇终局 ≈ 28.0 T，本来就够不着），
+   *     但必须**低于封顶那天的市值上限**，否则又变成一句永远兑现不了的假话。
+   */
   for (let i = 1; i < MILESTONES.length; i++) {
     need(MILESTONES[i].v > MILESTONES[i - 1].v, `里程碑第 ${i} 项没有严格递增`);
   }
-  need(MILESTONES[MILESTONES.length - 1].v < ACTS[8].mcap, '有个里程碑比第 8 章门槛还高 —— 它永远不会触发');
+  const inStory = MILESTONES.filter(m => m.v < ACTS[8].mcap);
+  const inSavor = MILESTONES.filter(m => m.v >= ACTS[8].mcap);
+  need(inStory.length === 8, `正篇里程碑不是 8 条（实得 ${inStory.length}）`);
+  need(inSavor.length === 9, `回味期里程碑不是 9 条（实得 ${inSavor.length}）`);
+  // 封顶上限 = 最后 12 个月里「世界榜首 + gap 满值」的最高者（`u` 只有到末尾才接近 1）
+  const wEnd = createWorld('B');
+  advanceWorld(wEnd, SAVOR_END_MONTH - 12);
+  let ceilT = 0;
+  for (let m = SAVOR_END_MONTH - 12; m <= SAVOR_END_MONTH; m++) {
+    advanceWorld(wEnd, 1);
+    ceilT = Math.max(ceilT, worldTop(wEnd) + SAVOR_GAP_MID + SAVOR_GAP_AMP);
+  }
+  for (const m of inSavor) {
+    need(toUSD_T(m.v) < ceilT,
+      `回味期里程碑 ${toUSD_T(m.v).toFixed(1)} T 高过封顶上限 ${ceilT.toFixed(1)} T —— 它永远触发不了`);
+  }
   need(LINES.length === 5, `投资线不是五条（实得 ${LINES.length}）`);
   need(Math.abs(LINE_GROWTH - CURVE_RATIO ** (1 / LINES.length)) < 1e-12, 'g ≠ r^(1/5)');
   need(LINE_GROWTH > 1 && LINE_GROWTH < CURVE_RATIO, 'g 没有落在 (1, r) 之间');
   need(SEC_PER_YEAR * TOTAL_YEARS / 3600 > 0, 'SEC_PER_YEAR 与年数不自洽');
   need(INCOME_SCALE > 0 && costOf(0) > 0, '开局系数非法');
-  return `g=${LINE_GROWTH.toFixed(4)} ｜ 跨度 ${(ACTS[8].mcap / ACTS[1].mcap).toExponential(1)} ｜ 里程碑 ${MILESTONES.length} 条`;
+  return `g=${LINE_GROWTH.toFixed(4)} ｜ 跨度 ${(ACTS[8].mcap / ACTS[1].mcap).toExponential(1)} ｜ 里程碑 ${inStory.length} 正篇 + ${inSavor.length} 回味期（上限 ${ceilT.toFixed(0)} T）`;
 });
 
 // ═══════════════════════════ 真实启动烟测（最后跑）═══════════════════════════

@@ -449,18 +449,22 @@ export function tick(s, dtReal = 0.1, live = false) {
      * 经营**照旧跑**（生产已在上面的 ①、自动购买在 ②；融资与订单在这里）——
      * 「像正常公司一样发展，只是玩家不能再操作」（用户 2026-09-28）。
      * 唯一要做的是**静音非市场日志**：年度报告（`【20xx 年】` 与年度决策）、订单文案、
-     * 里程碑、名次播报与决胜回执在回味期都是与市值榜无关的噪声，日志栏只留市场快讯。
+     * 名次播报与决胜回执在回味期都是与市值榜无关的噪声，日志栏只留市场快讯。
      * 手法：临时把 `s.log.push` 换成丢弃版 —— 只在这一次调用里生效，退出前原样还回去。
+     *
+     * ⚠️ **叙事里程碑不在静音之列**（2026-09-28 拓展）：它读 `D.marketCap`，而回味期的市值锚
+     *    是 `worldTick` 刚写下的 `s.savorCap` ⇒ 必须排在 `worldTick` **之后**、且在静音之外。
+     *    排在静音里等于把新补的九条（30~110 万亿）全吞掉；排在 `worldTick` 之前则要等下一帧。
      */
     const keepPush = s.log.push;
-    s.log.push = () => s.log.length;                 // 静音：下面五个都照跑，只是一个字不落
+    s.log.push = () => s.log.length;                 // 静音：下面四个都照跑，只是一个字不落
     financeTick(s, R, D);
     ordersTick(s, R);
     worldTick(s, R);
-    logMilestones(s, D);
     annualReport(s, R, D);
     s.log.push = keepPush;
 
+    logMilestones(s, D);                             // 会让出静音，见上
     savorNews(s, from, s.calMonth);                  // 每月一条，五类按优先级
 
     if (s.log.length > LOG_MAX) s.log.splice(0, s.log.length - LOG_MAX);
