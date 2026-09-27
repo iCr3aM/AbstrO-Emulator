@@ -120,9 +120,10 @@ html, body {
  *    多折出一行，整行两个框都被撑高，下一帧数字位数变了又缩回去。
  * 预算 = **4 行**：标签行 11px×1.5 = 16.5 ＋ 数值行 15px×1.5 = 22.5 ＋ 副行 ×2 = 33
  *                   ⇒ 内容 72 ＋ padding 8×2 ＋ border 1×2 = **90px**。
- * 现金格正好 4 行（可动用 / 储备 各一行）；其余三格 3 行，多出的 16.5px 是**故意留白**，
- * 换来的是「数字怎么涨，框都不动」。`overflow: hidden` 是兜底：真有 5 行的极端情况宁可裁掉，
- * 也不许把整块 HUD 顶开（`.hud .cell b` 已强制单行，见下 —— 实际到不了那一步）。
+ * 2026-09-27 起**四格都填满 4 行**（现金：可动用 / 储备；市值：年营收 / 环比；
+ * 净利率：PE / 净利；世界：上市状态 / 距上市或名次环比）—— 72px 正好用满。
+ * `overflow: hidden` 是兜底：真有 5 行的极端情况宁可裁掉，也不许把整块 HUD 顶开
+ * （`.hud .cell b` 已强制单行，见下 —— 实际到不了那一步）。
  */
 .hud .cell {
   display: block;
@@ -146,6 +147,13 @@ html, body {
   text-overflow: ellipsis;
 }
 .hud .cell u { display: block; text-decoration: none; font-size: 11px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/*
+ * 副行里的**红绿**（环比 / 名次升降）：与市值榜的升降、环比列同一套 `.up` / `.down`。
+ * 只有 `<em>` 上色，`环比` 三个字仍是灰的 —— 颜色是给数字的，不是给标签的。
+ */
+.hud .cell u em { font-style: normal; }
+.hud .cell u em.up { color: var(--ok); }
+.hud .cell u em.down { color: var(--bad); }
 /* 目标达成：**不打钩**（用户 2026-09-27）—— 目标文字转绿，标题行右端贴边写「完成」。
    ⚠️ 原来是**绿框**（`border` + `padding` 横向多占 14px）—— 用户 2026-09-27 二次修订：
       「绿色框加了现在会换行」⇒ **去掉框，只留颜色**。框一去掉，这一行也回到单行，不再顶高格子。 */
@@ -297,21 +305,46 @@ html, body {
   border-bottom: 1px solid var(--line);
   margin-bottom: 4px;
 }
+/* 榜头左侧的第二行：当下最热的行业（与周期播报同源）。
+   做成 `display:block` 的第二行而不是塞进同一行 —— 一行里塞「世界市值榜 当前最热：X 单位：Y」
+   在手机上必然折行，折在哪由字数决定。字号比正文小一档，它是脚注不是标题。
+   ⚠️ 原来还缀着「· 点一行看详情」，已删（用户 2026-09-27：只留「当前最热」）——
+   行里的公司详情仍然可点，只是不再用一行字去教。 */
+.rank-head em { display: block; font-style: normal; font-size: 11px; margin-top: 2px; }
+/*
+ * 一行 = 一枚**按钮**（2026-09-27 起整行可点，点开看公司详情）。
+ * ⚠️ `text-align: left` 与 `font: inherit` 不能漏：按钮的默认样式是**居中 + 系统字体**，
+ *    漏了的话公司名那一列会跟着居中，和上面的表头对不上。
+ * 列：名次 / 公司 / 升降 / 环比 / 市值（用户 2026-09-27 加的环比列）。
+ */
 .rank .row {
   display: grid;
-  grid-template-columns: 34px 1fr 44px auto;
+  grid-template-columns: 34px 1fr 36px 46px auto;
   gap: 8px;
   align-items: baseline;
-  padding: 3px 0;
+  width: 100%;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
   font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  padding: 3px 0;
 }
+.rank .row:active { background: rgba(255, 255, 255, .05); }
 .rank .row .no { color: var(--mut); font-size: 12px; }
 .rank .row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rank .row .dlt { font-size: 11px; text-align: right; color: var(--mut); }
-.rank .row .dlt .up { color: var(--ok); font-style: normal; }
-.rank .row .dlt .down { color: var(--bad); font-style: normal; }
-.rank .row .dlt .new { color: var(--gold); font-style: normal; }
+/* 环比列：数字位数会变（+3.4% / −12.5%），用等宽数字让两列数字对得上 */
+.rank .row .mom { font-size: 11px; text-align: right; color: var(--mut); font-variant-numeric: tabular-nums; }
+/* 升降符号与环比共用的红绿（两列都用 `<em class="up|down">`，所以选到 `.row` 这一层就够） */
+.rank .row .up { color: var(--ok); font-style: normal; }
+.rank .row .down { color: var(--bad); font-style: normal; }
+.rank .row .new { color: var(--gold); font-style: normal; }
 .rank .row .cap { text-align: right; font-variant-numeric: tabular-nums; }
+/* 点开那一行的详情条：缩到公司名那一列的左边距（34px 名次列 + 8px 间距），字号比正文小一档 */
+.rank .rdet { font-size: 11px; color: var(--mut); padding: 0 0 4px 42px; }
 /*
  * 玩家自己那一行（用户 2026-09-27：「还是看的不太清晰，可以高亮加点特效、加个框框」）：
  * 只换颜色 + 加粗是不够的 —— 整张榜都是绿压绿，一眼扫过去找不到自己。所以：

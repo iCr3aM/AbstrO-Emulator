@@ -14,7 +14,7 @@ import { deliverOrder } from './core/orders.js';
 import { rates } from './core/economy.js';
 import { evaluateRetirement } from './core/endings.js';
 import {
-  render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab,
+  render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab, setRankSel,
   armDeleteSave, deleteSaveArmed, disarmDeleteSave,
 } from './ui/render.js';
 import { bindActions } from './ui/bind.js';
@@ -105,6 +105,12 @@ const handlers = {
   tab(i) { play('ui', s.sfx); setTab(i); draw(); },
 
   /**
+   * 点开世界市值榜的**一行**看公司详情（行业 / 国家 / 入场年份）。
+   * 只是展开收起，不改任何游戏状态 —— 所以不存盘（与切页签同规矩）。
+   */
+  rank(k) { play('ui', s.sfx); setRankSel(k); draw(); },
+
+  /**
    * 音效开关（⚙ 里那个按钮）。
    * ⚠️ **不许关弹窗**（用户 2026-09-26）—— 点完要看得见「音效：开 ↔ 关」的变化，所以只重画弹窗。
    * 打开时立刻响一声，等于给玩家一个「确实开了」的回执。
@@ -168,6 +174,7 @@ function dispatch(el) {
   if (d.opt !== undefined) return handlers.opt(d.opt);
   if (d.speed !== undefined) return handlers.speed(d.speed);
   if (d.tab !== undefined) return handlers.tab(d.tab);
+  if (d.rank !== undefined) return handlers.rank(d.rank);
   if (d.retire !== undefined) return handlers.retire();
   if (d.settings !== undefined) return handlers.settings();
   if (d.audio !== undefined) return handlers.audio();

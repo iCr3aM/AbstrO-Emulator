@@ -98,9 +98,10 @@ import {
 } from '../src/core/format.js';
 import {
   createWorld, advanceWorld, ranking, worldDate, worldTick, toUSD_T, RMB_PER_T_USD, cycleNotes,
+  SECTOR_LABEL, hotSector,
 } from '../src/core/world.js';
 import {
-  render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab,
+  render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab, setRankSel,
   armDeleteSave, deleteSaveArmed, disarmDeleteSave, fmt,
 } from '../src/ui/render.js';
 import {
@@ -450,6 +451,164 @@ probe('rankDelta：新入场为 null，且上月名次按全榜重排', () => {
   }
   need(deepChecked > 0, '没有任何「10 名之外也发生名次变化」的样本 —— 全榜重排没被真正验到');
   return `第 ${bornAt} 月入场 ${fresh.length} 家；榜外换位 ${deepChecked} 家`;
+});
+
+/**
+ * 环比列（用户 2026-09-27）：「对比上个月涨了 xx%、跌了 xx%，就像排行榜上升、下降那样」。
+ * 这里**不复用渲染层的格式化函数**：探针要把规格独立说一遍（本月市值 ÷ 上月末市值 − 1，一位小数），
+ * 复用了就等于「用被测代码验证被测代码」。
+ */
+probe('市值榜环比列 = 本月市值 ÷ 上月末市值 − 1（新入场与持平留空）', () => {
+  const s = midState(3, 30);
+  s.finance.rounds = ['ipo'];
+  lookTab(s, TAB_RANK);
+  const rows = [...root.innerHTML.matchAll(
+    /class="row( me)?" data-rank="([^"]*)"[^>]*>([\s\S]*?)<\/button>/g)];
+  need(rows.length >= 20, `榜单只渲染出 ${rows.length} 行`);
+  const byName = new Map(s.world.companies.map(c => [c.n, c]));
+  let checked = 0, blank = 0;
+  for (const [, meCls, key, inner] of rows) {
+    const cell = /<span class="mom">([\s\S]*?)<\/span>/.exec(inner);
+    need(cell, `「${key}」那一行没有环比列`);
+    const text = cell[1].replace(/<[^>]*>/g, '').trim();
+    if (meCls) continue;                       // 玩家行归「环比基准」那条探针管
+    const c = byName.get(key);
+    need(c, `榜单里的「${key}」不在世界表里`);
+    if (c.born === s.world.month) {             // 本月新入场：prev 是上市估值，没有「上个月」
+      need(text === '', `本月新入场的「${key}」不该有环比（实得 ${text}）`);
+      blank += 1;
+      continue;
+    }
+    const d = c.cur / c.prev - 1;
+    if (Math.abs(d) < 0.0005) {
+      need(text === '', `「${key}」涨跌 ${d} 小到写不出，不该画（实得 ${text}）`);
+      blank += 1;
+      continue;
+    }
+    const want = `${d >= 0 ? '+' : '−'}${(Math.abs(d) * 100).toFixed(1)}%`;
+    need(text === want, `「${key}」环比写的是 ${text}，按 本月市值 ÷ 上月末市值 应为 ${want}`);
+    checked += 1;
+  }
+  need(checked >= 10, `只有 ${checked} 行的环比被真核对过 —— 样本太小`);
+  return `${rows.length} 行 · 核对 ${checked} 行 · 留空 ${blank} 行`;
+});
+
+probe('市值榜每行可点开公司详情（行业 / 国家），同值再点收起', () => {
+  const s = midState(3, 30);
+  lookTab(s, TAB_RANK);
+  need(root.innerHTML.includes('当前最热：'), '榜头没有「当前最热」那一行');
+  const hot = SECTOR_LABEL[hotSector(s.world.month)];
+  need(root.innerHTML.includes(`当前最热：${hot}`), `榜头的「当前最热」与 hotSector 对不上（应为 ${hot}）`);
+  need(!root.innerHTML.includes('class="rdet"'), '还没点任何一行，详情就已经展开了');
+  const btns = buttonsIn(root.innerHTML).filter(b => b.data.rank !== undefined);
+  need(btns.length >= 20, `带 data-rank 的行只有 ${btns.length} 个`);
+  const key = btns[0].data.rank;
+  setRankSel(key);
+  look(s);
+  const det = /<div class="rdet">([\s\S]*?)<\/div>/.exec(root.innerHTML);
+  need(det, `点了「${key}」却没有展开详情`);
+  const c = s.world.companies.find(x => x.n === key);
+  need(c, `「${key}」不在世界表里`);
+  need(det[1].includes(`行业 ${SECTOR_LABEL[c.s]}`),
+    `详情里没写行业（实得「${det[1]}」，应为「行业 ${SECTOR_LABEL[c.s]}」）`);
+  need(det[1].includes(c.co), `详情里没写国家 ${c.co}`);
+  setRankSel(key);                             // 同值再点 = 收起
+  look(s);
+  need(!root.innerHTML.includes('class="rdet"'), '同值再点没有收起');
+  return `「${key}」→ ${det[1]}`;
+});
+
+/**
+ * HUD 三格第四行（用户 2026-09-27：「市值那一个框……只显示了两行的数据，第三行加什么好？
+ * 以及净利率和世界的那个框同样」）。四格现在都是 4 行，正好填满锁死的 90px。
+ * ⚠️ 三个未上市分支**各自钉死 `calMonth`** —— 世界格那一行是**按日历年算的倒计时**，
+ *    不钉的话「第 3 章 + 一轮都没融」这种组合在真实玩法里不可能出现，算出来的年数也没意义。
+ */
+probe('HUD 三格第四行：市值环比 / 净利 / 世界格「距下一轮融资 N年」与名次环比', () => {
+  const s = midState(3, 30);
+  const at = months => { s.calMonth = months; return 2026 + Math.floor(months / 12); };
+  lookTab(s, TAB_FOUNDER);
+  const before = visible(root.innerHTML);
+  need(before.includes('净利 ¥'), '净利率格没有第三行「净利 ¥X」');
+  need(before.includes('环比'), '市值格没有第三行「环比」');
+
+  // ⓐ 一轮都没融 ⇒ 下一轮是天使轮（2031）
+  s.finance.rounds = [];
+  const yA = at(12);                                    // 2027 年
+  lookTab(s, TAB_FOUNDER);
+  const angel = /距天使轮 (\d+)年/.exec(visible(root.innerHTML));
+  need(angel, `未上市且下一轮是天使轮时应写「距天使轮 N年」（实得「${visible(root.innerHTML)}」）`);
+  need(Number(angel[1]) === 2031 - yA, `「距天使轮 ${angel[1]}年」≠ 2031 − ${yA}`);
+
+  // ⓑ 融到 C 轮 ⇒ 下一轮是 Pre-IPO。**名字里的空格必须去掉**（73px 预算，带空格是 75~76px）
+  s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c'];
+  const yB = at(288);                                   // 2050 年
+  lookTab(s, TAB_FOUNDER);
+  need(visible(root.innerHTML).includes(`距Pre-IPO ${2051 - yB}年`),
+    `下一轮是 Pre-IPO 时应写「距Pre-IPO N年」（实得「${visible(root.innerHTML)}」）`);
+
+  // ⓒ 只剩 IPO ⇒ 回到市值口径（IPO 是市值门槛，写「距 IPO N 年」是假的）
+  s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo'];
+  at(312);                                              // 2052 年
+  lookTab(s, TAB_FOUNDER);
+  const m = /距上市 ×([\d.]+)/.exec(visible(root.innerHTML));
+  need(m, '只剩 IPO 时世界格没有回到「距上市 ×N」');
+  // 数值必须与 IPO 门槛同源：×N = IPO_LINE ÷ 当前市值
+  // ⚠️ 只到整数位 —— 半格实测可用宽度 73px，`×41.7万` 那种一位小数会横向溢出（`npm run shots`）。
+  const want = fmt(IPO_LINE / derived(s).marketCap, 0);
+  need(m[1] === want, `「距上市 ×${m[1]}」≠ IPO_LINE ÷ 当前市值 = ×${want}`);
+
+  // ⓓ 上市后：这一行改成名次环比，且融资倒计时必须消失
+  s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'];
+  s.worldRank = 42;
+  s.worldRankPrev = 45;
+  lookTab(s, TAB_RANK);
+  const up = visible(root.innerHTML);
+  need(!/距(上市|天使轮)/.test(up), '上市后世界格还写着融资 / 上市倒计时');
+  need(up.includes('名次 ↑3'), `世界格没写名次上升（实得「${up}」）`);
+  s.worldRankPrev = 40;
+  lookTab(s, TAB_RANK);
+  need(visible(root.innerHTML).includes('名次 ↓2'), '名次下滑没写 ↓N');
+  s.worldRankPrev = 42;
+  lookTab(s, TAB_RANK);
+  need(visible(root.innerHTML).includes('名次持平'), '名次没变没写「持平」');
+  s.worldRankPrev = 50;
+  s.worldRank = 137;                                   // 100 名开外 ⇒ 这一行留空（那一区间天天在漂）
+  lookTab(s, TAB_RANK);
+  need(!/名次/.test(visible(root.innerHTML)), '名次 >100 时这一行应留空');
+  setTab(TAB_FOUNDER);
+  return `天使轮 ${angel[1]}年 · Pre-IPO ${2051 - yB}年 · ×${m[1]} ／ 上市 ↑3 · ↓2 · 持平 · >100 留空`;
+});
+
+/**
+ * 环比基准只在**跨月那一刻**换一次。
+ * ⚠️ 这条守的是最容易被写错的一处：`worldTick` 每帧都被调（`engine.tick`），
+ *    而 `target`（`gameMonths`）一个月里几百帧都不变 —— 只要快照写在分支之外又没有
+ *    `target !== s.world.month` 这个判断，第二帧就会把「本月末」当成「上月末」存进基准，
+ *    环比于是变成「与上一帧比」。
+ */
+probe('环比基准（worldPrevCap / worldRankPrev）只在跨月那一刻换一次', () => {
+  const s = createState();
+  tick(s, 0);                                  // 建世界表 / 写进度钟
+  s.calMonth = s.world.month;                  // 把进度钟钉死在当前世界月
+  worldTick(s, rates(s));
+  need(s.worldPrevCap == null, '第一帧就凭空有了「上月末」基准');
+  s.lines = bal(60);                           // 同一个月里市值跳一大截
+  worldTick(s, rates(s));
+  need(s.worldPrevCap == null, '月份没变却换了环比基准 —— 环比会变成「与上一帧比」');
+
+  // 这个月的两个值，就是「下个月的环比基准」应当钉住的东西
+  const cap0 = s.worldCap, rank0 = s.worldRank;
+  s.calMonth = s.world.month + 1;              // 真的跨一个月
+  worldTick(s, rates(s));
+  need(s.worldPrevCap === cap0, `跨月后的基准应停在上月末 ${cap0}，实得 ${s.worldPrevCap}`);
+  need(s.worldRankPrev === rank0, `跨月后的名次基准应停在上月末 #${rank0}，实得 #${s.worldRankPrev}`);
+  need(s.worldCap !== cap0, '跨了一个月，本月市值却没变 —— 样本不成立');
+  s.lines = bal(90);                           // 同月内市值再跳一次（月份没变）
+  worldTick(s, rates(s));
+  need(s.worldPrevCap === cap0, `同月内基准被反复覆盖（${s.worldPrevCap} ≠ ${cap0}）`);
+  need(s.worldRankPrev === rank0, '同月内名次基准被反复覆盖');
+  return `上月末 ${cap0.toFixed(6)}T · #${rank0}`;
 });
 
 // ═══════════════════════════ §1.5 年度决策 ═══════════════════════════

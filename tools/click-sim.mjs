@@ -24,7 +24,7 @@ import { CURVE_RATIO, MANUAL_GAIN, MANUAL_PAY, RESERVE_FRAC, LINES } from '../sr
 import { evaluateRetirement } from '../src/core/endings.js';
 import {
   render, renderEnding, renderNotTop, renderOffline, renderSettings, closeModal, setTab,
-  armDeleteSave, deleteSaveArmed, disarmDeleteSave,
+  armDeleteSave, deleteSaveArmed, disarmDeleteSave, setRankSel,
 } from '../src/ui/render.js';
 import { bindActions, ACTION_KEYS, PRIMARY_EVENT } from '../src/ui/bind.js';
 
@@ -100,6 +100,8 @@ const handlers = {
   settings() { renderSettings(overlay, s); },
   speed(v) { s.speed = Number(v) || 1; draw(); },
   tab(i) { setTab(i); draw(); },
+  /** 世界榜的一行：展开 / 收起公司详情（主件里会顺手响一声，这里只切状态） */
+  rank(k) { setRankSel(k); draw(); },
   /** 音效开关：主件里会顺手放一声「叮」，这里只切状态（无头环境没有 AudioContext） */
   audio() { s.sfx = s.sfx === false; renderSettings(overlay, s); },
   delete() {
@@ -118,6 +120,7 @@ function dispatch(el) {
   if (d.opt !== undefined) return handlers.opt(d.opt);
   if (d.speed !== undefined) return handlers.speed(d.speed);
   if (d.tab !== undefined) return handlers.tab(d.tab);
+  if (d.rank !== undefined) return handlers.rank(d.rank);
   if (d.settings !== undefined) return handlers.settings();
   if (d.retire !== undefined) return handlers.retire();
   if (d.audio !== undefined) return handlers.audio();
@@ -223,6 +226,25 @@ const seenKeys = new Set();
   check('点交付按钮真的拿到了订单钱（准时 ×1.0，且出队）',
     !!delivered && s.money > moneyBefore && s.orders.live.length === live - 1,
     `${live} → ${s.orders.live.length} 条 ｜ +${(s.money - moneyBefore).toFixed(0)}`);
+  setTab(0);
+  draw();
+}
+
+// ── ①d 市值榜：每行都是按钮，点一下展开公司详情（行业 / 国家），同值再点收起 ──
+{
+  setTab(3);
+  draw();
+  const rows = buttonsIn(app.innerHTML).filter(b => b.data.rank !== undefined);
+  check('市值榜每一行都是可点的按钮（data-rank）', rows.length >= 20, `实际 ${rows.length} 行`);
+  check('榜头写着「当前最热」的行业（与周期播报同源）', app.innerHTML.includes('当前最热：'));
+  const first = rows[0];
+  appBox.fire(PRIMARY_EVENT, ev({ target: clickable(first) }));
+  check('点一行：行下方展开详情（行业 / 国家）',
+    app.innerHTML.includes('class="rdet"') && app.innerHTML.includes('行业 '),
+    `点的是「${first.label}」`);
+  const again = buttonsIn(app.innerHTML).find(b => b.data.rank === first.data.rank);
+  appBox.fire(PRIMARY_EVENT, ev({ target: clickable(again) }));
+  check('同值再点：详情收起（收起态也住在模块里）', !app.innerHTML.includes('class="rdet"'));
   setTab(0);
   draw();
 }
@@ -427,7 +449,7 @@ check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.en
 // ── ⑧ 派发路径审计 ──
 {
   check('主事件是 pointerdown（不是 click）', PRIMARY_EVENT === 'pointerdown', PRIMARY_EVENT);
-  const missing = ACTION_KEYS.filter(k => !['buy', 'order', 'opt', 'speed', 'tab', 'retire', 'settings', 'audio', 'delete', 'close'].includes(k));
+  const missing = ACTION_KEYS.filter(k => !['buy', 'order', 'opt', 'speed', 'tab', 'rank', 'retire', 'settings', 'audio', 'delete', 'close'].includes(k));
   check('dispatch 覆盖了全部 ACTION_KEYS', missing.length === 0, missing.join('、'));
   check(`走完整局一共见到 ${seenKeys.size} 种动作键，没有越界的`, [...seenKeys].every(k => ACTION_KEYS.includes(k)),
     [...seenKeys].filter(k => !ACTION_KEYS.includes(k)).join('、'));

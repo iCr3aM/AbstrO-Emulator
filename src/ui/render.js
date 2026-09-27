@@ -10,11 +10,12 @@
 
 import {
   ACTS, LINES, lineName, FOUNDERS, agesAt, PENDING_CAP, SEC_PER_YEAR, companyName, MILESTONES,
+  IPO_LINE,
 } from '../core/content.js';
 import { rates, derived, manualCostOf, canAffordManual, sharePctOf } from '../core/economy.js';
 import { ORDER_SLOTS, liveOf, liveCount, hasHot, isHot, monthsLeftOf, valueOf, describeOrder, doneCount } from '../core/orders.js';
-import { ranking, toUSD_T } from '../core/world.js';
-import { isListed, ROUNDS } from '../core/finance.js';
+import { ranking, toUSD_T, SECTOR_LABEL, hotSector, WORLD_START_YEAR } from '../core/world.js';
+import { isListed, ROUNDS, yearNow } from '../core/finance.js';
 import { gameDate, gameYear } from '../core/format.js';
 import { pendingEvent, stageGoalMet, LOG_MAX } from '../core/engine.js';
 import { ENDING_TEXT } from '../core/endings.js';
@@ -104,6 +105,22 @@ function deltaOf(c) {
  */
 const rankText = r => (r <= RANK_MAX ? String(r) : `>${RANK_MAX}`);
 
+/**
+ * 环比百分比：`+3.4%` / `−1.2%`（用 U+2212 的 `−`，与 `rateOf` 同一个减号，不与 ASCII `-` 混用）。
+ * 恒一位小数：环比本来就只到「涨了几个百分点」的精度，两位是假精确。
+ */
+const pctText = v => `${v >= 0 ? '+' : '−'}${(Math.abs(v) * 100).toFixed(1)}%`;
+
+/** 带红绿的环比（`.up` / `.down` 与榜单升降、HUD 副行共用同一套着色） */
+const dirEm = v => `<em class="${v >= 0 ? 'up' : 'down'}">${pctText(v)}</em>`;
+
+/**
+ * 玩家市值的**环比**（对上一个世界月）—— 与市值榜里玩家行用的是**同一个数**：
+ * 两边都拿「当帧市值 ÷ 上月末快照」。各算一遍迟早会不一致，所以收成一个函数。
+ * @returns 没有基准（新档第一帧 / 旧档缺字段）时为 `null`
+ */
+const capMomOf = (s, D) => (s.worldPrevCap > 0 ? toUSD_T(D.marketCap) / s.worldPrevCap - 1 : null);
+
 // ─────────────────────────── 常驻 HUD ───────────────────────────
 /**
  * 四格 2×2：**现金总额** / 市值 / 净利率＋世界排名（同框，左净利率右排名）/ 本阶段目标。
@@ -116,8 +133,15 @@ const rankText = r => (r <= RANK_MAX ? String(r) : `>${RANK_MAX}`);
  * ⚠️ 副行原来是**一行**「可动用 ¥X ｜ 储备 ¥Y」（用户 2026-09-27 反馈：现金格会随文字跳动
  *    格子高度）—— 两个金额位数一变（`¥432万` → `¥2500.00万亿`），这一行就在 1 行 / 2 行
  *    之间来回折，同一 grid 行被撑高，整块 HUD 跟着跳。拆成两个 `<u>` 后**恒 4 行**。
- *    第三、四格本来就是 3 行，`style.css` 里 `.hud .cell` 按 4 行预算锁死高度，四格同高。
+ *    其余三格 2026-09-27 也补满了第 4 行（见下），现在四格**都是 4 行**，
+ *    `style.css` 里 `.hud .cell` 按 4 行预算锁死高度，四格同高。
  * 三位创始人的年龄挂在目标格的副行（他们不进任何公式，只是叙事）。
+ *
+ * **2026-09-27 补第三行**（用户：「市值那一个框现在不是三行吗？可是只显示了两行」）：
+ * 现金格本来就占满 4 行，其余三格各空一行 ⇒ 现在逐格补上，四格全部 4 行、正好填满 72px：
+ *   · 市值格   → `环比 ±x.x%`（与市值榜里玩家行同一个数，见 `capMomOf`）
+ *   · 净利率格 → `净利 ¥X`（`R.net` = 年营收 − 年支出，口径与上面的 `年营收` 对得上）
+ *   · 世界格   → 未上市写「距下一轮融资 N年」（只剩 IPO 时写 `距上市 ×N`）；上市写名次环比（见下）
  *
  * 目标达成的表现是**目标文字转绿 + 标题行右端写「完成」**，**不打钩**（用户 2026-09-27）：
  * 打钩只是给词尾缀了一个符号，转绿则把「这一条已经跨过」摊在整个词上 —— 一眼就能扫到。
@@ -138,11 +162,40 @@ function hud(s, R, D) {
   const listed = isListed(s);
   const r = s.worldRank;
   const ranked = listed ? (r && r <= RANK_MAX ? `#${r}` : `>${RANK_MAX}`) : '—';
+  const mom = capMomOf(s, D);
+  /**
+   * 世界格的第四行 —— **没上市做「下一轮融资倒计时」，上市了说「名次比上个月动了几名」**。
+   *
+   * 未上市这一段（用户 2026-09-27 二次裁决）：原来写 `距上市 ×7954`（差多少倍市值），
+   * 数字虽准，但开局是「×7954」这种八千倍的数，读起来只有「还早得很」，没有目标感。
+   * 改成**下一轮融资的倒计时**：`距天使轮 5年` / `距Pre-A轮 6年` … `距C轮 3年`。
+   * ⚠️ **只剩 `ipo` 那一轮时回到「距上市 ×N」** —— IPO 是**市值门槛**（`D.marketCap ≥ IPO_LINE`），
+   *    与年份无关，写成「距 IPO N 年」是假的。这也是唯一一处「跨阶段」的正确口径。
+   * ⚠️ 轮次名里的空格要**去掉**（`Pre-A 轮` → `Pre-A轮`）：半格实测可用宽度仅 73px，
+   *    带空格时 `Pre-A 轮 6年` 是 75px、`距 Pre-IPO 7年` 是 76px，都会横向溢出（`npm run shots`）。
+   *    去空格后 `距Pre-IPO 7年` / `距Pre-A轮 6年` 都恰好 73px。
+   *
+   * ⚠️ 名次在 100 名开外时**这一行留空**（用户 2026-09-27 拍板），与榜单里玩家行同一条规矩：
+   *    那个区间每天在漂，↑3 / ↓5 只是噪声，反而让人以为有事发生。（格子高度是锁死的，留空不会跳。）
+   * ⚠️ `距上市 ×N` **只保留整数**：一位小数会写出 `×41.7万`（77px），同样溢出。
+   */
+  let worldSub = '';
+  if (!listed) {
+    const nr = ROUNDS.find(x => !s.finance.rounds.includes(x.id));
+    worldSub = nr && nr.id !== 'ipo'
+      ? `距${nr.name.replace(/\s+/g, '')} ${Math.max(0, nr.year - yearNow(s))}年`
+      : `距上市 ×${fmt(IPO_LINE / D.marketCap, 0)}`;
+  } else if (s.worldRankPrev != null && r && r <= RANK_MAX) {
+    const d = s.worldRankPrev - r;                     // 正数 = 排名前进（与榜单 `rankDelta` 同向）
+    worldSub = d > 0 ? `名次 <em class="up">↑${d}</em>`
+      : d < 0 ? `名次 <em class="down">↓${-d}</em>`
+      : '名次持平';
+  }
   return `
   <div class="hud">
     <span class="cell"><i>现金<em>${rateOf(R.netPerSec)}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
-    <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u></span>
-    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u></span><span class="half"><i>世界</i><b>${ranked}</b><u>${listed ? '已上市' : '未上市'}</u></span></span>
+    <span class="cell"><i>市值</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>环比 ${mom == null ? '—' : dirEm(mom)}</u></span>
+    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u><u>净利 ¥${fmt(R.net, 0)}</u></span><span class="half"><i>世界</i><b>${ranked}</b><u>${listed ? '已上市' : '未上市'}</u><u>${worldSub}</u></span></span>
     <span class="cell"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
   </div>`;
 }
@@ -219,8 +272,48 @@ function orderBlock(s, R, dis) {
 
 // ─────────────────────────── 世界市值榜（§1.4）───────────────────────────
 /**
+ * 展开详情的那一行 —— key = 玩家行写 `'me'`，其余写公司名（见 `rankBlock` 的 `row`）。
+ * ⚠️ 与 `tab` / `deleteArmed` 同规矩：`render()` 是全量重建，这个态**必须住在模块里**，
+ *    留在 DOM 的 class 上活不过一帧。
+ * 不进存档：它是一次查看动作，不是游戏状态。
+ */
+let rankSel = null;
+/** 点同一行 = 收起（第二次点同一个 key 就把选中清掉） */
+export function setRankSel(k) { rankSel = rankSel === k ? null : k; }
+
+/**
+ * 环比列（用户 2026-09-27：「对比上个月涨了 xx%、跌了 xx%，就像排行榜上升、下降那样」）。
+ * 三种情况**留空**，因为写出来是噪声而不是信息：
+ *   ① 本月新入场 —— 它的 `prev` 是**上市估值**，根本没有「上个月」可比（`ranking` 已标 `isNew`）；
+ *   ② 涨跌小到只会写成 `+0.0%`；
+ *   ③ 玩家第一帧 / 旧档 —— 没有上月末快照。
+ */
+function momTextOf(c) {
+  if (c.isNew || !(Math.abs(c.mom) >= 0.0005)) return '';
+  return dirEm(c.mom);
+}
+
+/**
+ * 展开的详情一行（用户 2026-09-27：「世界榜公司详情 / 行业可见」）。
+ * 只说榜上看不出来的事：**行业**、**国家**、**哪一年入场**（`born` 只有 IPO 池与黑马才有，
+ * 100 家老公司开局就在榜上，不写）。环比与名次变化**不重复** —— 它们已经在行里了。
+ * ⚠️ 玩家行的行业是 `ranking` 为了排序临时塞的 `'space'`，不是事实 ⇒ 那一行不报行业。
+ */
+function detailOf(c) {
+  const bits = c.me ? ['中国', '你的公司'] : [`行业 ${SECTOR_LABEL[c.s] || c.s}`, c.co];
+  if (c.born != null) bits.push(`${WORLD_START_YEAR + Math.floor((c.born - 1) / 12)} 年入场`);
+  return `<div class="rdet">${bits.map(esc).join(' · ')}</div>`;
+}
+
+/**
  * 前 20 名 + （上市且掉在 20 名开外时）把玩家钉在列表底部单独一行。
  * 玩家那一行显示的是**公司名**（不是「我们」）并整行加亮 —— 榜单是给玩家看自己爬到哪儿的。
+ *
+ * 每行是**一个按钮**（`data-rank`）：点开在行下方展开 `detailOf` 那一行。
+ * 整行做靶子而不是只让公司名可点 —— 手机上 34px 宽的名次列也是能按到的。
+ * 卡片头上那行「当前最热」与周期播报同源（`hotSector`）—— 榜上写的和播报说的必须是同一件事。
+ * ⚠️ 原先是「当前最热：X · 点一行看详情」，**「点一行看详情」半句已删**（用户 2026-09-27，
+ *    LESS IS MORE）：操作提示是「可以没有的说明」，而「最热」是信息，只能留一个。
  */
 function rankBlock(s, D) {
   if (!s.world) return '<div class="rank"><div class="rank-head"><span>世界市值榜</span><span>单位：万亿美元</span></div></div>';
@@ -230,21 +323,26 @@ function rankBlock(s, D) {
   const me = all.find(c => c.me);
   const mine = companyName(listed);
   const row = c => {
+    const key = c.me ? 'me' : c.n;
     const showDelta = !(c.me && c.rank > RANK_MAX);
     return `
-    <div class="row${c.me ? ' me' : ''}">
+    <button class="row${c.me ? ' me' : ''}" data-rank="${esc(key)}">
       <span class="no">${rankText(c.rank)}</span>
       <span class="nm">${esc(c.me ? mine : c.n)}</span>
       <span class="dlt">${showDelta ? deltaOf(c) : ''}</span>
+      <span class="mom">${momTextOf(c)}</span>
       <span class="cap">${tUsd(c.cur)}</span>
-    </div>`;
+    </button>${rankSel === key ? detailOf(c) : ''}`;
   };
   const rows = top.map(row).join('');
   // 名次 > 20 时钉在列表底部单独一行（上市后才会出现）；100 名开外只报「>100」
   const pin = me && me.rank > RANK_SHOW ? `<div class="sep">⋯</div>${row(me)}` : '';
   return `
   <div class="rank">
-    <div class="rank-head"><span>世界市值榜</span><span>单位：万亿美元</span></div>
+    <div class="rank-head">
+      <span>世界市值榜<em>当前最热：${esc(SECTOR_LABEL[hotSector(s.world.month)] || '—')}</em></span>
+      <span>单位：万亿美元</span>
+    </div>
     ${rows}${pin}
   </div>`;
 }

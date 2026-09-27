@@ -5,7 +5,8 @@
  * 不进收入公式、不给任何长期乘数 ⇒ 不改经济模型，标定只需把它的现金量算进去。
  *
  * 三条硬约束：
- *   ① **零 `Math.random()`** —— 等级按序号轮转（`ORDER_TIERS` 六档），
+ *   ① **零 `Math.random()`** —— 等级按序号轮转（`ORDER_TIERS` 六档，**只有第 0 条单是特例**：
+ *      固定第 2 档「系统对接」，见 `ordersTick`），
  *      客户类别与形态由 `uid` 的 `hash32` 现算，
  *      所以同一份存档永远跑出同一串订单，无头工具才可能断言。
  *   ② **报酬 = 当前年营收 × (payEq/500) × 客户系数 × 形态系数** ——
@@ -128,7 +129,13 @@ export function ordersTick(s, R) {
     if (s.orders.live.length < ORDER_SLOTS) {
       s.orders.live.push({
         uid: ++s.uidSeq,
-        tier: ORDER_TIERS[n % ORDER_TIERS.length].tier,
+        /**
+         * ⚠️ **第 0 条单指定第 2 档**（用户 2026-09-27 裁决，方案 A）——
+         *    唯一一处破「等级按 `n % 6` 纯轮转」的特例。
+         *    原来第 0 条单落在第 1 档（最小），价值不到一份 `cost` ⇒ 玩家点了也买不了下一级，
+         *    等于「开局第一件事白做」。一局只影响这一条，之后照旧轮转。
+         */
+        tier: n === 0 ? ORDER_TIERS[1].tier : ORDER_TIERS[n % ORDER_TIERS.length].tier,
         born: n * ORDER_EVERY_MONTHS,
       });
     }

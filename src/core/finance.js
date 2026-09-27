@@ -68,8 +68,8 @@ export const ROUNDS = [
 /** 已上市的判据：`rounds` 里有 ipo（世界榜据此决定要不要把玩家排进去） */
 export const isListed = s => !!(s.finance && s.finance.rounds.includes('ipo'));
 
-/** 当前日历年（进度钟的派生量） */
-const yearNow = s => 2026 + Math.floor(gameMonths(s) / 12);
+/** 当前日历年（进度钟的派生量）—— HUD 的「距下一轮 N 年」也用它，别在别处再算一遍 */
+export const yearNow = s => 2026 + Math.floor(gameMonths(s) / 12);
 
 /** 每 tick 调用：到点就自动触发尚未完成的融资轮 */
 export function financeTick(s, R, D) {

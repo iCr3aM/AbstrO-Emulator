@@ -109,6 +109,23 @@ function sectorRotation(month, sector) {
 }
 
 /**
+ * 当下**最热**的行业（= 8 条正弦里此刻最高的那个）。
+ *
+ * 两处用它：① `cycleNotes` 每 80 月那一条轮动播报；② 市值榜卡片头上那行「当前最热：X」。
+ * 抽出来是因为**它们必须是同一个真相** —— 榜头写着 AI、播报却说资金转向能源，玩家只会觉得界面在骗人。
+ * ⚠️ 与 `sectorRotation` 共用 `ROTATE_MONTHS` 与相位表：界面上的「最热」与世界内部真正
+ *    在加的那点增速，是同一件事。
+ */
+export function hotSector(month) {
+  let best = null;
+  for (const k of Object.keys(SECTOR_PHASE)) {
+    const v = Math.sin((month / ROTATE_MONTHS) * Math.PI * 2 + SECTOR_PHASE[k]);
+    if (!best || v > best.v) best = { k, v };
+  }
+  return best.k;
+}
+
+/**
  * 新建世界（可序列化，直接存进存档）。
  * @param seed 每局的随机源（游戏内传 s.rngSeed）—— 只用于决定**抽到哪几家黑马**，
  *             所有后续走势仍由 (月份, 公司, salt) 的哈希驱动，两者互不干扰。
@@ -376,12 +393,8 @@ export function cycleNotes(from, to, w) {
 
     // ② 行业轮动（每个行业一条 8 年正弦，相位错开）：每 80 月报一次「当下最热的是谁」
     if (m % ROTATE_NARRATE_MONTHS === 0) {
-      let best = null;
-      for (const k of Object.keys(SECTOR_PHASE)) {
-        const v = Math.sin((m / ROTATE_MONTHS) * Math.PI * 2 + SECTOR_PHASE[k]);
-        if (!best || v > best.v) best = { k, v };
-      }
-      out.push(`【轮动】资金转向${SECTOR_LABEL[best.k] || best.k}`
+      const hot = hotSector(m);                     // 与市值榜卡片头上那行同一个真相
+      out.push(`【轮动】资金转向${SECTOR_LABEL[hot] || hot}`
         + ` —— ${ROTATE_LINES[(m / ROTATE_NARRATE_MONTHS - 1) % ROTATE_LINES.length]}`);
     }
 
@@ -436,13 +449,22 @@ export function worldTick(s, R = null) {
    *    8 幕跨度合计仍是 480 月，打满还是 2066 ⇒ 终局标定（第 40 年榜首 vs 玩家终值）不变。
    */
   const target = gameMonths(s);
+  /**
+   * 玩家「上月末市值 / 上月末名次」快照 —— 只在跨月那一刻取一次。
+   * `s.worldCap` / `s.worldRank` 在本帧被覆盖之前，存的是**上一个世界月**的值
+   * （两者都只在本函数末尾落库，而世界月只在这里推进）⇒ 它们就是环比的基准。
+   * （离线一次跳多个月时，基准会跨越那几个月 —— 这是能拿到的唯一真相。）
+   * ⚠️ 快照必须在分支之前：向前推进与旧档回拉都会发生「时间往前走」这件事，
+   *    放在任一支里，另一支就会让基准悄悄停在上上个月。
+   * ⚠️ **必须带上 `target !== s.world.month`**：本函数每帧都被调（`engine.tick`），
+   *    而 `target` 是 `gameMonths(s)`（整数月）—— 一个月里它会连着几百帧都不变。
+   *    少这个判断，第二帧就把「本月末」当成「上月末」写进基准 ⇒ 环比恒为 0。
+   */
+  if (s.worldCap != null && target !== s.world.month) {
+    s.worldPrevCap = s.worldCap;
+    s.worldRankPrev = s.worldRank ?? null;
+  }
   if (target > s.world.month) {
-    /**
-     * 玩家「上月末市值」快照 —— 只在跨月那一刻取一次。
-     * `s.worldCap` 上一帧的值正好属于**上一个世界月**（世界月只在这里推进），
-     * 所以它就是环比的基准。（离线一次跳多个月时，基准会跨越那几个月 —— 这是能拿到的唯一真相。）
-     */
-    if (s.worldCap != null) s.worldPrevCap = s.worldCap;
     const from = s.world.month;
     advanceWorld(s.world, target - from);
     /**

@@ -39,15 +39,15 @@
 /**
  * 所有「动作键」——渲染出的 `data-*` 必须落在这里面，否则点了没反应。
  *
- * ⚠️ 重制版（v4）的动作面收敛到十条：点一条投资线、**交付一条订单**、结算一条待决、
- *    关弹窗、**退休**、音效开关、设置、删档、调倍速、切页签。旧版的 `choice / act / bid / skill /
- *    intro / fold / focus` 对应的系统（三选一、合同、技能、开幕剧情、折叠块、自动购买方向）
- *    已全部删除。
+ * ⚠️ 重制版（v4）的动作面收敛到十一条：点一条投资线、**交付一条订单**、结算一条待决、
+ *    关弹窗、**退休**、音效开关、设置、删档、调倍速、切页签、**点开世界榜一行看详情**。
+ *    旧版的 `choice / act / bid / skill / intro / fold / focus` 对应的系统（三选一、合同、
+ *    技能、开幕剧情、折叠块、自动购买方向）已全部删除。
  *    `retire` 一度被删（2026-09-27 上午），同日又装回来了 —— 但它**不住页头**，
  *    而是 HUD 上面一条通栏横条（`.retire`），页头因此仍然只有一行。
  */
 export const ACTION_KEYS = [
-  'buy', 'order', 'opt', 'close', 'retire', 'audio', 'settings', 'delete', 'speed', 'tab',
+  'buy', 'order', 'opt', 'close', 'retire', 'audio', 'settings', 'delete', 'speed', 'tab', 'rank',
 ];
 
 /**

@@ -69,6 +69,8 @@ export function createState() {
     worldCap: null,
     worldPrevCap: null,
     worldRank: null,
+    /** 上月末的玩家名次（与 `worldPrevCap` 同一次快照）—— HUD 世界格的名次环比用它 */
+    worldRankPrev: null,
     worldBest: 999,
     worldMilestones: [],
     /** 已经记过的**叙事里程碑下标**（`content.MILESTONES` 的顺序号）—— 只记日志，不加效果 */
