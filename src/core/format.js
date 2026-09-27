@@ -11,7 +11,7 @@
 //    幕的年份区间（`ACTS[].years`）重新成为日历的真相源 ⇒ 本文件重新 import `ACTS`。
 //    `SEC_PER_YEAR` 不再参与日历推导（它降级为「一局多长」的标定参考，见 content.js），
 //    所以这里也不再 import 它。
-import { ACTS, START_MCAP } from './content.js';
+import { ACTS, START_MCAP, SAVOR_END_MONTH } from './content.js';
 
 const UNITS = [
   { v: 1e12, s: '万亿' },
@@ -131,12 +131,16 @@ export function calMonthOf(s, D) {
 }
 
 /**
- * 游戏内已经过去多少个月（0 起，封顶 480）。
+ * 游戏内已经过去多少个月（0 起，封顶 `SAVOR_END_MONTH`）。
  * @param s 存档状态。只读 `s.calMonth` 一个**派生**字段（由 `engine.tick` 每帧写入）。
  *          没写过时按 0 处理 —— 新档第一帧渲染出来就是 2026 年 8 月，与起点一致。
+ *
+ * ⚠️ 上限是 **720**（`SAVOR_END_MONTH` = 2086-08）而不是正篇的 480：回味期日历由真实秒推进，
+ *    会一路走到 720。取值只可能是「先打满 480 才可能到 720 之上」，而 480 以上只有回味期
+ *    才到得了 ⇒ **不影响正篇**（正篇的 `calMonthOf` 永远返回 ≤ 480）。
  */
 export function gameMonths(s) {
-  return Math.max(0, Math.min(MONTHS_TOTAL, Math.floor(s.calMonth || 0)));
+  return Math.max(0, Math.min(SAVOR_END_MONTH, Math.floor(s.calMonth || 0)));
 }
 
 export function gameDate(s) {

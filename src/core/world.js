@@ -11,9 +11,9 @@
  */
 
 import { TOP100, IPO_POOL, DARK_HORSES, ALPHA, SECTOR_LABEL } from './world-data.js';
-import { gameMonths } from './format.js';
+import { gameMonths, MONTHS_TOTAL } from './format.js';
 import { derived } from './economy.js';
-import { DIL_AT } from './content.js';
+import { DIL_AT, cycleAt, valAt, SAVOR_GAP_MID, SAVOR_GAP_AMP, SAVOR_RAMP_MONTHS, SAVOR_HANDOFF_MONTHS } from './content.js';
 
 /** 世界起点：2026 年 9 月（= 游戏开局） */
 export const WORLD_START_YEAR = 2026;
@@ -437,7 +437,7 @@ const RANK_NARRATION = {
 };
 
 /** 点名用的短名：**最多 8 单位**（4 个全角字 / 8 个半角字符）—— 名字多长都不撑破那一行 */
-function shortName(n) {
+export function shortName(n) {
   let out = '', w = 0;
   for (const c of n) {
     const u = c.charCodeAt(0) > 0xff ? 2 : 1;
@@ -446,6 +446,24 @@ function shortName(n) {
   }
   return out;
 }
+
+/**
+ * 当下**不含玩家**的榜首市值（万亿美元）—— 回味期玩家市值的锚点（第九批 §2）。
+ * ⚠️ 它同时是榜单上「第二名」的位置：玩家被钉在它**上面** `gap` 处，
+ *    所以「榜上的玩家 = HUD 的玩家」这件事只有一个来源（`worldTick`）。
+ */
+export function worldTop(w) {
+  let m = 0;
+  for (const c of w.companies) if (c.cur > m) m = c.cur;
+  return m;
+}
+
+/**
+ * ⚠️ 并列保护：登顶那一帧 `u = 0` ⇒ gap = 0 ⇒ 玩家市值与榜首**逐位相等**，
+ *    而 `ranking` 的排序在相等时把后插入的玩家排在**后面** ⇒ 名次会闪一下第 2 名。
+ *    1e-9 T（= 7200 元）在 1.87e14 元上小到看不见，却把「并列」变成「严格第一」。
+ */
+const TIE_EPS = 1e-9;
 
 /**
  * 每帧调用：把世界推进到当前游戏月份，并结算「我们排第几」。
@@ -487,8 +505,12 @@ export function worldTick(s, R = null) {
     /**
      * 周期播报**只在这一支**（向前推进）。上面那个回拉分支是「重建 + 推进到 target」，
      * 在那里播报会把整局的周期事件重播一遍。
+     *
+     * ⚠️ **回味期不在这里播报**：那 240 个月由 `engine.tick` 的月度市场快讯统一落
+     *    （①黑天鹅 ②大盘·特殊 也复用这份池子，见 `engine.savorNews`）——
+     *    这里再播一次，同一个月就会落两条。
      */
-    for (const line of cycleNotes(from, target, s.world)) s.log.push(line);
+    if (!s.ending) for (const line of cycleNotes(from, target, s.world)) s.log.push(line);
   } else if (target < s.world.month) {
     /**
      * **旧档回拉**（2026-09-25）。
@@ -505,7 +527,52 @@ export function worldTick(s, R = null) {
     advanceWorld(s.world, target);
   }
 
-  const cap = toUSD_T((R ? derived(s, R) : derived(s)).marketCap);
+  /**
+   * 回味期（登顶后）：**玩家市值 = 世界榜首 + gap**（第九批 §2）。
+   * 必须写在算 `cap` **之前** —— `derived()` 会优先取 `s.savorCap`，
+   * 于是「榜上的玩家」与「HUD 的玩家」只有一个来源，不可能对不上。
+   *
+   * `u` 把 gap 在 `SAVOR_RAMP_MONTHS`（240 游戏月 = **整个回味期**）里从 0 爬到满值：
+   * 登顶那一帧 gap = 0，直到封顶 2086-08 才到满值 —— 一条**缓慢曲线**。
+   * （旧口径 24 月 = 2 真实分钟就拉满 ⇒ 登顶后不久玩家就比榜首高 15 T，量级太夸张，用户已否。）
+   *
+   * ⚠️ **不能把「自己的账面市值」掺进公式**（2026-09-28 实测，两次否掉）：
+   *    · 线性混合 `(1−u)×自己 + u×(榜首 + gap)`：`u` 小时把自己压到榜首**之下**
+   *      （实测 `player(504) ≈ 29.4 T < 榜首 34.14 T`）⇒ 直接掉出第一；
+   *    · `max(自己, 榜首 + gap)`：经营在回味期照跑且**复利**，自己的账面市值 20 真实分钟
+   *      从 28.0 T 涨到 **259 T（×9.25）** ⇒ gap 被顶到 **161.67 T**，量级彻底失控。
+   *    ⇒ 结论与 GDD §1.1 一致：回味期的市值**必须锚在榜首上**，自己的营收只当背景音。
+   *
+   * ⚠️ **`handoff`（登顶交接）**：登顶那一帧自己 **28.0 T** 已经高过榜首 **26.0 T**
+   *    （`capRatio 1.076`），纯锚定会让 HUD 在切换那一帧**凭空跌 7%**（看起来就是个 bug）。
+   *    把「自己高过榜首的那部分」按 `SAVOR_HANDOFF_MONTHS`（2 真实分钟）衰减掉：
+   *    `age = 0` 时逐位等于自己（无跳变），2 分钟后交接完毕、只剩 `gap`。
+   *    衰减窗口刻意**短**：自己的账面市值那 2 分钟只涨 ×1.4（≈ 40 T），泄漏有限；
+   *    若让它跟着 240 个月的 `u` 衰减，就又会回到「+2 分钟 40 T」那个用户否掉的量级。
+   */
+  const D0 = R ? derived(s, R) : derived(s);
+  if (s.ending) {
+    const top = worldTop(s.world);
+    /**
+     * ⚠️ `age` 用**小数月**（`s.calMonth`）而不是 `target`（= `gameMonths`，**整数**月）。
+     *    用整数月的话 `u` 与 `gap` 在一个游戏月之内**逐位不变** ⇒ HUD 市值变成
+     *    「5 真实秒跳一格」，而不是用户要的「每秒都在跳」（实测 60 帧只有 12 个不同的值）。
+     *    `target` 仍留给 `cycleAt`（它本来就是一条按月采样的锯齿）。
+     *
+     * ⚠️ 旧的登顶档没有 `topMonth`（R4 之前没有这个字段），合并后拿到 0 ——
+     *    直接算会让 `age = 480+` ⇒ `u` 立刻 = 1、gap 一次性跳到满值（实测 41.04 T）。
+     *    这里按「登顶点 = 正篇终点」兜底，与 `save.applyOffline` 给旧档补 `calMonth` 的口径一致。
+     */
+    const since = s.topMonth > 0 ? s.topMonth : MONTHS_TOTAL;
+    const age = Math.max(0, (s.calMonth || 0) - since);
+    const u = Math.min(1, age / SAVOR_RAMP_MONTHS);
+    const gap = (SAVOR_GAP_MID + SAVOR_GAP_AMP * cycleAt(target)) * u;
+    const own = toUSD_T(D0.marketCapBase * valAt(target));
+    const handoff = Math.max(0, own - top) * Math.max(0, 1 - age / SAVOR_HANDOFF_MONTHS);
+    s.savorCap = (top + gap + handoff + TIE_EPS) * RMB_PER_T_USD;
+  }
+
+  const cap = toUSD_T(s.ending ? s.savorCap : D0.marketCap);
   const { all } = ranking(s.world, cap, 1e9, s.worldPrevCap ?? null);
   const me = all.find(c => c.me);
   const rank = me.rank;

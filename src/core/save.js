@@ -6,7 +6,7 @@ import { SAVE_KEY, serialize, deserialize, createState } from './state.js';
 import { OFFLINE_CAP_SEC, OFFLINE_MODIFIER } from './content.js';
 import { offlineRun } from './engine.js';
 import { derived } from './economy.js';
-import { calMonthOf } from './format.js';
+import { calMonthOf, MONTHS_TOTAL } from './format.js';
 
 export { OFFLINE_CAP_SEC, OFFLINE_MODIFIER };
 
@@ -65,11 +65,18 @@ export function applyOffline(s, nowMs = Date.now()) {
   const equiv = capped * OFFLINE_MODIFIER;
 
   /**
-   * 进度钟：`s.calMonth` 是**派生**缓存（不入存档），读档后还没被任何 tick 写过。
+   * 进度钟：`s.calMonth` 是**派生**缓存（正篇不入存档），读档后还没被任何 tick 写过。
    * 这里先刷一次 —— 否则刚进页面时日历与世界榜会短暂地按「第 0 月」渲染，
    * 下一帧才跳回真实进度。
+   *
+   * ⚠️ **回味期（登顶后）不重算**：那时 `calMonth` 由真实秒推进、从市值**算不回来**，
+   *    而 `calMonthOf` 超过末档只会返回 480 ⇒ 读档会把日历从 700 拽回 480
+   *    （表现为「读档倒退 20 年」，世界榜跟着被拖回去）。
+   *    这一行同时修好了 R4 之前的**旧登顶档**（没有 `calMonth` 字段）：`0 → 480`，落在合理位置。
    */
-  s.calMonth = calMonthOf(s, derived(s));
+  s.calMonth = s.ending
+    ? Math.max(s.calMonth || 0, MONTHS_TOTAL)
+    : calMonthOf(s, derived(s));
 
   const report = equiv > 0 ? offlineRun(s, equiv) : null;
   s.elapsed += capped;

@@ -177,13 +177,22 @@ export const sharePctOf = (revenue, year) => {
  *
  * 语义上也站得住：**日历记的是「公司走到哪一步」，市值记的是「市场当时给多少钱」**——
  * 估值与经营脱钩，正是现实里会发生的事。
+ *
+ * ⚠️ **回味期（登顶后）市值换锚**（第九批）：不再取 `base × valAt`，而是取 `s.savorCap`
+ *    —— 它 = 「世界榜首（不含玩家）+ gap」，由 `world.js` 的 `worldTick` 每帧写入。
+ *    理由：经营在回味期照跑且**复利**，自由生长的话自己的账面市值 20 真实分钟会从 28 T 涨到
+ *    **259 T**（实测 ×9.25）—— 量级远超用户要的「只比第二名多一点」；锚在榜首上则收敛到
+ *    113~123 T。`marketCapBase` 照旧算（它仍是「公司的真实进度」），
+ *    只是回味期没人再拿它当市值用（日历也已改由真实秒驱动，见 `engine.tick`）。
  */
 export function derived(s, R = rates(s)) {
   const pe = peOf(s);
   const reserve = reserveOf(s.money);
   const base = R.revenue * pe;
+  const anchored = s.ending && s.savorCap > 0;
   return {
-    ...R, pe, marketCapBase: base, marketCap: base * valAt(gameMonths(s)),
+    ...R, pe, marketCapBase: base,
+    marketCap: anchored ? s.savorCap : base * valAt(gameMonths(s)),
     sharePct: sharePctOf(R.revenue, gameYear(s)),
     reserve, spendable: spendableOf(s),
   };

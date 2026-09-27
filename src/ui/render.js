@@ -36,6 +36,8 @@ const TABS = ['创始人', '公司', '订单', '市值榜'];
 const TAB_FOUNDER = 0;
 const TAB_COMPANY = 1;
 const TAB_ORDER = 2;
+/** 市值榜 —— 登顶后**唯一**可点的页（第九批 §6） */
+const TAB_RANK = 3;
 
 /**
  * 五条线怎么分页：创始人页三条（研发 / 营销 / 招聘 —— 各由一位创始人把着），
@@ -290,7 +292,7 @@ function orderBlock(s, R, dis) {
   }).join('');
   return `
   <div class="orders">
-    <div class="o-head"><span>在手订单 <b>${live.length}</b> / ${ORDER_SLOTS} 条</span><span>已完成 <b>${doneCount(s)}</b> 项</span></div>
+    <div class="o-head"><span>在手订单 <b>${live.length}</b> / ${ORDER_SLOTS} 条</span><span>已完成 <b>${doneCount(s)}</b> 单</span></div>
     ${live.length ? rows : '<div class="o-empty">暂时没有在手的单子。</div>'}
   </div>`;
 }
@@ -478,6 +480,14 @@ export function render(root, s) {
    */
   const slowed = dilate(s) < 1;
 
+  /**
+   * 登顶之后**只剩市值榜**（第九批 §6）：其余三个页签 `disabled`（`bind.js` 的派发会跳过
+   * `disabled` 元素），而且**正文一律改画市值榜** —— 否则玩家登顶那一刻若正停在「公司」页，
+   * 页签已经点不动了，却还看着那一页的残影，只剩退休这一条路。
+   * 买卖 / 待决 / 倍速此时本来就已经 `disabled` / 撤掉，于是可点的只剩「市值榜」与「退休」。
+   */
+  const page = s.ending ? TAB_RANK : tab;
+
   if (root.style && root.style.setProperty) {
     const acc = ACCENT[s.stage] || ACCENT[1];
     root.style.setProperty('--accent', acc);
@@ -508,13 +518,15 @@ export function render(root, s) {
   const tabs = TABS.map((t, i) => {
     const hot = ((i === TAB_ORDER && hasHot(s)) || (i === TAB_COMPANY && s.pending.length > 0)) ? ' hot' : '';
     const n = i === TAB_ORDER ? liveCount(s) : i === TAB_COMPANY ? s.pending.length : 0;
-    return `<button class="tab${i === tab ? ' on' : ''}${hot}" data-tab="${i}">${esc(t)}${n ? ` ${n}` : ''}</button>`;
+    // 登顶后其余三个页签一律 disabled（`page` 已经锁定在市值榜，见上）
+    const off = s.ending && i !== TAB_RANK ? ' disabled' : '';
+    return `<button class="tab${i === page ? ' on' : ''}${hot}" data-tab="${i}"${off}>${esc(t)}${n ? ` ${n}` : ''}</button>`;
   }).join('');
 
   /** 待决卡片长在「公司」页（用户 2026-09-27 修正：不挪去创始人页，改用页签角标提醒） */
-  const body = tab === TAB_COMPANY ? `${lines(s, R, dis, PAGE_LINES[TAB_COMPANY])}${pendingBlock(s, dis)}`
-    : tab === TAB_FOUNDER ? lines(s, R, dis, PAGE_LINES[TAB_FOUNDER])
-    : tab === TAB_ORDER ? orderBlock(s, R, dis)
+  const body = page === TAB_COMPANY ? `${lines(s, R, dis, PAGE_LINES[TAB_COMPANY])}${pendingBlock(s, dis)}`
+    : page === TAB_FOUNDER ? lines(s, R, dis, PAGE_LINES[TAB_FOUNDER])
+    : page === TAB_ORDER ? orderBlock(s, R, dis)
     : rankBlock(s, D);
 
   /**

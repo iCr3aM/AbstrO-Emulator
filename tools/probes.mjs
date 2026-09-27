@@ -74,6 +74,7 @@ import {
   FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, lineName,
   AUTO_BUY_RESERVE, AUTO_BUY_RESERVE_EARLY, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, AUTO_DECIDE_STAGE,
   DIL_MIN, DIL_AT, SAVOR_RATE,
+  SAVOR_MONTHS_PER_MIN, SAVOR_END_MONTH, SAVOR_GAP_MID, SAVOR_GAP_AMP,
 } from '../src/core/content.js';
 import {
   rates, derived, costOf, costFor, purchase, lineLevel, manualCostOf, canAffordManual,
@@ -99,7 +100,7 @@ import {
 } from '../src/core/format.js';
 import {
   createWorld, advanceWorld, ranking, worldDate, worldTick, toUSD_T, RMB_PER_T_USD, cycleNotes,
-  SECTOR_LABEL, hotSector,
+  SECTOR_LABEL, hotSector, worldTop,
 } from '../src/core/world.js';
 import {
   render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab, setRankSel,
@@ -1799,19 +1800,19 @@ probe('订单页：在手条数挂上页签、大单时页签亮起、交付按�
   need(dels.every(b => b.data.order === '61' || b.data.order === '62'), '交付按钮的 uid 对不上在手订单');
   need(visible(root.innerHTML).includes('剩余'), '交付单上没有剩余月数');
   /**
-   * 两行布局 + 分割线 + 右上「已完成 N 项」（用户 2026-09-27）。
+   * 两行布局 + 分割线 + 右上「已完成 N 单」（用户 2026-09-27 / 文案 2026-09-28 定稿）。
    * 一条单必须**恰好两个块**：`.o-nm`（甲方 + 报酬）与 `.o-act`（内容 + 剩余 + 按钮）——
    * 这样甲方永远在第一行、按钮永远在第二行右端，不会因为字数不同而版式乱掉。
    */
   need((root.innerHTML.match(/class="o-nm"/g) || []).length === 2, '订单没有按两行渲染（缺 .o-nm）');
   need((root.innerHTML.match(/class="o-act"/g) || []).length === 2, '订单没有按两行渲染（缺 .o-act）');
-  need(/class="o-head">[\s\S]*?已完成 <b>/.test(root.innerHTML), '在手订单右上角没有「已完成 N 项」');
-  need(doneCount(s) === 0, `还没交付就报「已完成 ${doneCount(s)} 项」`);
+  need(/已完成 <b>\d+<\/b> 单/.test(root.innerHTML), '在手订单右上角不是「已完成 N 单」');
+  need(doneCount(s) === 0, `还没交付就报「已完成 ${doneCount(s)} 单」`);
   need(!s.ending && deliverOrder(s, 62, rates(s)), '从界面拿到的大单交付不了');
   need(liveCount(s) === 1, '交付后在手条数没减');
   need(doneCount(s) === 1, `交付一单后累计数没 +1（实得 ${doneCount(s)}）`);
   setTab(0);
-  return `在手 2 条 → 1 条 · 大单 1 行高亮 · 已完成 ${doneCount(s)} 项`;
+  return `在手 2 条 → 1 条 · 大单 1 行高亮 · 已完成 ${doneCount(s)} 单`;
 });
 
 probe('归零按钮（买不起）仍然是可点元素 —— 只是压暗', () => {
@@ -1829,40 +1830,80 @@ probe('归零按钮（买不起）仍然是可点元素 —— 只是压暗', ()
 });
 
 /**
- * 登顶之后有**两条分支**（用户 2026-09-28），这条探针把两条都钉住。
+ * ═══════════════════ 第九批 · 登顶后的回味期（市值模拟器）═══════════════════
  *
- * 用户原话是「登顶后……时间变得特别慢……直到玩家点击退休」：真实会话里时间**慢放**而不是定格，
- * HUD 上的数字一直跳。但离线结算与无头工具必须继续定格 —— 前者会让读档回来发现数字被推进过，
- * 后者没有「玩家点退休」这个终止条件，会一直跑到超时。分界就是 `tick` 的第三参数 `live`。
+ * 用户口径（四轮，全部保留原文）：
+ *   ·「登顶之后纯当市值模拟器了」
+ *   ·「经营不能冻结，要像正常公司一样发展，只是玩家不能再操作了，这样才有回味的感觉」
+ *   ·「登顶时候的玩家，不需要那么大的量级，确保高过第二名就好了」+「可以再比第二名多一点，多个 10-20 T」
+ *     （R5 修订：先按「末期 104~114 T」把 `SAVOR_GAP_MID` 压到 6，用户随后拍板**改回 15** ——
+ *      保留 R4 的「多 10-20 T」原口径 ⇒ 末期 gap ∈ [10, 20] T，玩家 ≈ 113~123 T）
+ *   ·「挂机一整个月会推进多久时间？」
  *
- * ⚠️ 界面那一半与分支无关：登顶之后投资线 / 待决选项 / 倍速**一律不可点**（买卖已经没必要了）。
+ * 下面的九条探针把这几句话逐条钉住。共用两个 fixture 工厂。
  */
-probe('登顶后：非实时会话仍定格，真实会话按 SAVOR_RATE 慢放（且忽略 s.speed）', () => {
-  const s = midState(5, 40);
-  s.ending = 'top';
-  s.pending = [{ uid: 9, id: 'e11' }];            // 登顶后连待决选项也不许点
-  // ⚠️ 待决选项 + 2 条资产线在「公司」页，3 条创始人线在另一页；
-  //    倍速在页头（两页都渲染），所以只能从一页里数一次，否则会重复计数。
-  const companyBtns = lookTab(s, TAB_COMPANY);
-  const founderBtns = lookTab(s, TAB_FOUNDER);
-  const frozen = companyBtns.filter(b => b.data.buy !== undefined || b.data.opt !== undefined)
-    .concat(founderBtns.filter(b => b.data.buy !== undefined))
-    .concat(founderBtns.filter(b => b.data.speed !== undefined));
-  need(frozen.length === 2 + 2 + 3 + 3, `可点元素不是 10 个（实得 ${frozen.length}）`);
-  need(frozen.every(b => b.disabled), '登顶后仍有能点动的买卖 / 倍速 / 选项按钮');
-  // 设置不许禁：它是删档的唯一入口。
-  // 「退休」横条同样不许禁 —— 登顶之后点它就是「再看一遍结局」，禁掉反而没路回去看。
-  need(companyBtns.some(b => b.data.settings !== undefined && !b.disabled), '登顶把「设置」也禁掉了');
-  need(companyBtns.some(b => b.data.retire !== undefined && !b.disabled), '登顶把「退休」横条也禁掉了');
-  need(!root.innerHTML.includes('已登顶 · 时间冻结'), '登顶后还挂着旧版那条「已登顶 · 时间冻结」提示');
 
+/**
+ * 造一个「刚登顶」的回味期存档（合成档，数值不真实但结构完整）。
+ * `months` 默认 `MONTHS_TOTAL`（480）—— 也就是登顶那一刻的日历。
+ * ⚠️ `topMonth` 必须与 `calMonth` 一起给：它是 gap 爬坡（`u`）的起点。
+ */
+function savorState(months = MONTHS_TOTAL) {
+  const s = midState(8, 40);
+  s.ending = 'top';
+  s.topMonth = months;
+  s.calMonth = months;
+  s.worldBest = 1;
+  tick(s, 0, true);        // dt=0：只让 worldTick 落一次 savorCap / worldCap，不推进任何东西
+  return s;
+}
+
+/**
+ * **真实登顶那一帧**的克隆（`A.s`）—— 用来验「切换不跳变」。
+ * ⚠️ 必须克隆：`A.s` 后面还有几条探针在读（终局口径、曲线闸门），改了它会连带改掉那些结论。
+ */
+const topFrame = () => JSON.parse(JSON.stringify(A.s));
+
+probe('回味期：只剩市值榜可点 —— 其余三页签 / 买卖 / 待决 / 倍速 / 订单一律点不动', () => {
+  const s = savorState();
+  s.pending = [{ uid: 9, id: 'e11' }];            // 即便手上还压着待决，也不许点
+  const btns = lookTab(s, TAB_COMPANY);           // 故意切「公司」页：正文应被锁回市值榜
+  need(!/data-buy=|data-opt=|data-speed=|data-order=/.test(root.innerHTML),
+    '登顶后仍渲染出了买卖 / 待决 / 倍速 / 订单按钮');
+  need(root.innerHTML.includes('class="rank"'), '登顶后正文不是市值榜');
+  need(!root.innerHTML.includes('class="lines"'), '登顶后正文里还有投资线');
+  const tabs = btns.filter(b => b.data.tab !== undefined);
+  need(tabs.length === 4, `页签不是 4 个（实得 ${tabs.length}）`);
+  const on = tabs.filter(t => !t.disabled);
+  need(on.length === 1 && Number(on[0].data.tab) === TAB_RANK,
+    `登顶后可点的页签不是「只有市值榜」（实得 ${on.map(t => t.label).join('/') || '无'}）`);
+  const live = btns.filter(b => !b.disabled).map(b => Object.keys(b.data)[0]);
+  // `tab` 只许是市值榜那一个（上面已经断言过），榜单行 / 设置 / 退休都要留着
+  const bad = live.filter(k => k !== 'rank' && k !== 'settings' && k !== 'retire' && k !== 'tab');
+  need(bad.length === 0, `登顶后还有别的可点元素：${[...new Set(bad)].join('/')}`);
+  // 设置不许禁（删档的唯一入口）；「退休」横条不许禁（重看结局的唯一入口）。
+  need(live.includes('settings'), '登顶把「设置」也禁掉了');
+  need(live.includes('retire'), '登顶后没有「退休」横条');
+  need(!root.innerHTML.includes('已登顶 · 时间冻结'), '登顶后还挂着旧版那条「已登顶 · 时间冻结」提示');
+  setTab(0);
+  return `可点的只剩「市值榜」页签 + ${live.filter(k => k === 'rank').length} 行榜单 + 设置 + 退休`;
+});
+
+probe('回味期：非实时会话仍定格，真实会话按 SAVOR_RATE 慢放（且忽略 s.speed）', () => {
+  const s = savorState();
+  /**
+   * ⚠️ **先热身一帧**：登顶那一帧 `derived()` 才算得出新市值，于是「市值够到 IPO 线」这类
+   *    一次性入账（最后一轮融资、逾期订单的自动交付）会落在紧随其后的那一帧上。
+   *    不热身的话它们会混进下面的读数里 —— 实测把差值放大到 **13637 倍**。
+   */
+  tick(s, 0.4, true);
   /**
    * ① **非实时会话**（`live` 缺省 = false）—— 离线结算与无头工具走这一条，必须**逐位定格**。
    *    少了它，读档回来会发现数字被离线推进过，`check` / `probe` 也会一直跑到超时。
    */
   const snap = () => JSON.stringify({
-    money: s.money, elapsed: s.elapsed, stage: s.stage,
-    lines: s.lines, calMonth: s.calMonth, rank: s.worldRank, hasWorld: !!s.world,
+    money: s.money, elapsed: s.elapsed, stage: s.stage, lines: s.lines,
+    calMonth: s.calMonth, rank: s.worldRank, cap: s.savorCap, hasWorld: !!s.world,
   });
   const before = snap();
   tick(s, 12345);
@@ -1887,8 +1928,170 @@ probe('登顶后：非实时会话仍定格，真实会话按 SAVOR_RATE 慢放�
     `回味期推进量不是 netPerSec × dtReal × SAVOR_RATE（实得 ${(s.money / want).toFixed(3)} 倍）`);
   need(Math.abs(s.elapsed - elapsed0 - 0.4) < 1e-9,
     '回味期的 elapsed 不是按**真实秒**记的（`s.elapsed` 只记这局玩了多久）');
-  setTab(0);
-  return `10 个按钮全禁 · 非实时定格 · 真实会话 ${SAVOR_RATE}×（忽略 8×）`;
+  return `非实时定格 · 真实会话 ${SAVOR_RATE}×（忽略 8×）`;
+});
+
+probe('回味期：日历按真实秒匀速推进（12 游戏月 / 真实分钟），封顶 2086-08 后彻底静止', () => {
+  const s = savorState();
+  const d = SAVOR_MONTHS_PER_MIN / 60;                    // 1 真实秒该推进的游戏月
+  const m0 = s.calMonth;
+  tick(s, 1, true);
+  need(Math.abs(s.calMonth - m0 - d) < 1e-9,
+    `1 真实秒推进了 ${(s.calMonth - m0).toFixed(6)} 游戏月，应为 ${d}`);
+  const d1 = s.calMonth - m0;
+  tick(s, 1, true);
+  need(Math.abs(s.calMonth - m0 - 2 * d1) < 1e-9, '回味期日历不是匀速的（第二秒推进量不同）');
+
+  // 封顶：把日历直接放到上限，之后**时间、经营、世界榜一起定住**
+  s.calMonth = SAVOR_END_MONTH;
+  need(gameDate(s) === '2086年8月', `封顶日期不是 2086年8月（实得 ${gameDate(s)}）`);
+  const frozen = JSON.stringify({
+    money: s.money, calMonth: s.calMonth, elapsed: s.elapsed,
+    world: s.world.month, cap: s.savorCap,
+  });
+  tick(s, 3600, true);                                    // 挂机一小时的极端值
+  need(JSON.stringify({
+    money: s.money, calMonth: s.calMonth, elapsed: s.elapsed,
+    world: s.world.month, cap: s.savorCap,
+  }) === frozen, '日历封顶后经营 / 世界榜仍在推进（该彻底静止）');
+  return `1 秒 = ${d} 月 · 封顶 2086年8月后连挂机 1 小时也不动`;
+});
+
+probe('回味期：世界继续走，玩家恒为第一，gap 是一条缓慢爬升的曲线（封顶才到 10~20 T）', () => {
+  const s = topFrame();                                   // 真实的登顶帧
+  let hi = -Infinity, lo = Infinity, worst = 0, peaked = 0, early = null;
+  /** 逐帧「一动没动」的次数 —— 用户要的是「每秒数值都在跳」，不是「5 秒跳一格」 */
+  let flat = 0, prevCap = null;
+  /**
+   * 1210 真实秒 = 24.2 游戏年 > 回味期全长 20 分钟 ⇒ 一定能走到封顶（`Math.min` 夹住后
+   * 下一帧就被 `s.calMonth >= SAVOR_END_MONTH` 那个出口挡住）。多跑的那几步不动任何数。
+   */
+  for (let i = 0; i < 1210; i++) {
+    tick(s, 1, true);
+    worst = Math.max(worst, s.worldRank);
+    const c = toUSD_T(s.savorCap);
+    peaked = Math.max(peaked, c);
+    // 封顶之后本就该彻底静止 ⇒ 只统计封顶之前
+    if (prevCap != null && c === prevCap && s.calMonth < SAVOR_END_MONTH - 1e-9) flat++;
+    prevCap = c;
+    const g = c - worldTop(s.world);                       // 玩家高出榜首多少
+    if (g < lo) lo = g;
+    if (g > hi) hi = g;
+    if (i === 119) early = g;                              // 登顶 +2 真实分钟（24 游戏月）
+  }
+  need(flat === 0,
+    `封顶前有 ${flat} 帧市值一动没动 —— 玩家市值被按「整数月」采样了（应逐帧变化）`);
+  need(s.calMonth >= SAVOR_END_MONTH - 1e-9,
+    `24 真实分钟没走到封顶（calMonth = ${s.calMonth}）`);
+  need(s.world.month > MONTHS_TOTAL + 100,
+    `回味期世界榜没继续推进（停在 ${s.world.month} 月）`);
+  need(worst === 1, `回味期玩家掉到第 ${worst} 名`);
+  need(lo >= -1e-6, `gap 出现负值 ${lo.toFixed(3)} T —— 玩家掉到榜首之下`);
+  need(hi <= SAVOR_GAP_MID + SAVOR_GAP_AMP + 1e-6,
+    `gap 顶到 ${hi.toFixed(2)} T（应 ≤ ${SAVOR_GAP_MID + SAVOR_GAP_AMP} T）`);
+  const end = toUSD_T(s.savorCap) - worldTop(s.world);     // 封顶那一帧
+  need(end >= SAVOR_GAP_MID - SAVOR_GAP_AMP - 1e-6 && end <= SAVOR_GAP_MID + SAVOR_GAP_AMP + 1e-6,
+    `封顶那一帧 gap = ${end.toFixed(2)} T，不在 ${SAVOR_GAP_MID}±${SAVOR_GAP_AMP} 内`);
+  // +2 真实分钟 = 24 游戏月 ⇒ u = 0.1 ⇒ gap 至多 `满值 × 0.1`（这里留到 0.15 的余量）。
+  // ⚠️ 阈值随口径走，不写死：把 `SAVOR_GAP_MID` 从 6 改回 15 时它必须跟着变。
+  const earlyCap = (SAVOR_GAP_MID + SAVOR_GAP_AMP) * 0.15;
+  need(early != null && early < earlyCap,
+    `登顶 +2 真实分钟 gap 已到 ${early == null ? '?' : early.toFixed(2)} T`
+    + `（应 < ${earlyCap.toFixed(2)} T）—— 不是缓慢曲线`);
+  need(peaked < 200, `回味期里玩家市值冲到 ${peaked.toFixed(1)} T —— 量级爆表了`);
+  return `世界走到 ${s.world.month} 月 · 玩家恒第 1 · gap ${lo.toFixed(1)}~${hi.toFixed(1)} T`
+    + `（+2 分钟仅 ${early.toFixed(2)} T，封顶 ${peaked.toFixed(0)} T）`;
+});
+
+probe('回味期：登顶切换那一帧不跳变（从自己的市值逐位交接，不凭空跌）', () => {
+  const s = topFrame();
+  const own = toUSD_T(derived(s).marketCap);              // 登顶帧玩家自己的真实市值
+  const top = worldTop(s.world);                          // 同一帧的榜首（不含玩家）
+  tick(s, 0, true);
+  const cap = toUSD_T(s.savorCap);
+  need(cap >= own - 1e-9, `登顶切换那一帧玩家市值凭空跌了（${own.toFixed(2)} → ${cap.toFixed(2)} T）`);
+  // ⚠️ 容差 1e-6 而不是 1e-9：`savorCap` 里恒加了并列保护 `TIE_EPS = 1e-9`（T）。
+  need(Math.abs(cap - own) < 1e-6,
+    `登顶那一帧的市值不是「自己」（实得 ${cap.toFixed(3)}，应 ${own.toFixed(3)}）`);
+  need(cap > top, `登顶那一帧玩家没高过榜首（${cap.toFixed(2)} vs ${top.toFixed(2)} T）`);
+  return `登顶帧 ${own.toFixed(1)} T（榜首 ${top.toFixed(1)} T，逐位交接，无跳变）`;
+});
+
+probe('回味期：封顶后的存档读回来仍是锚定值（`savorCap` 不入存档，必须补算）', () => {
+  const s = savorState();
+  for (let i = 0; i < 1210; i++) tick(s, 1, true);        // 一路开到封顶
+  need(s.calMonth >= SAVOR_END_MONTH - 1e-9, `没走到封顶（calMonth = ${s.calMonth}）`);
+  const capped = toUSD_T(s.savorCap);
+  /**
+   * 模拟读档：`state.serialize` 会把 `savorCap` 剥掉（它是派生缓存）。
+   * 封顶之后 `engine.tick` 在第一行就返回 ⇒ 若那个出口不补算，`savorCap` 永远是 0，
+   * `derived()` 会退回**未锚定**的 `marketCapBase × valAt`，而且**永不自愈**。
+   */
+  delete s.savorCap;
+  tick(s, 0.1, true);                                     // 读档后的第一帧
+  const after = toUSD_T(derived(s).marketCap);
+  need(Math.abs(after - capped) < 1e-6,
+    `封顶档读回来市值变了：${capped.toFixed(2)} T → ${after.toFixed(2)} T（锚丢了）`);
+  return `封顶 ${capped.toFixed(1)} T · 读档后逐位不变（${after.toFixed(1)} T）`;
+});
+
+probe('回味期：旧的登顶档（没有 `topMonth`）也从「自己」起步，不凭空跳到满值', () => {
+  const a = savorState();                                 // 正常档：`topMonth = calMonth`
+  const b = savorState();
+  delete b.topMonth;                                      // R4 之前的旧档合并后拿到 0
+  tick(a, 0, true);
+  tick(b, 0, true);
+  need(Math.abs(toUSD_T(a.savorCap) - toUSD_T(b.savorCap)) < 1e-6,
+    `旧档没有兜底：正常档 ${toUSD_T(a.savorCap).toFixed(2)} T vs 旧档 ${toUSD_T(b.savorCap).toFixed(2)} T`);
+  return `旧档与正常档逐位一致（${toUSD_T(b.savorCap).toFixed(1)} T，不是一上来就满值）`;
+});
+
+probe('回味期：读档不回退日历（离线多久都不许把它拽回正篇终点之下）', () => {
+  const s = savorState();
+  for (let i = 0; i < 180; i++) tick(s, 1, true);         // 推进 36 游戏月
+  const m = s.calMonth, money = s.money, world = s.world.month;
+  need(m > MONTHS_TOTAL, `fixture 没推进（calMonth=${m}）`);
+  applyOffline(s, Date.now() + 30 * 86400e3);             // 离线 30 天
+  need(s.calMonth === m, `离线 30 天把回味期日历拉回了 ${s.calMonth}（原 ${m}）`);
+  need(s.world.month === world, `离线把世界榜推回了 ${s.world.month}（原 ${world}）`);
+  need(s.money === money, '离线结算推进了回味期的现金（登顶后一律定格）');
+  return `日历 ${m.toFixed(1)} 月 · 世界 ${world} 月 —— 离线 30 天一格不动`;
+});
+
+probe('回味期：日志栏每月恰好一条市场快讯（无年报 / 订单 / 里程碑噪声）', () => {
+  const s = savorState();
+  s.log.length = 0;                                       // 清空，只看回味期写了什么
+  const byMonth = new Map();
+  const seen = [];
+  const startM = gameMonths(s);
+  let prevM = startM;
+  for (let i = 0; i < 150; i++) {                         // 150 真实秒 = 30 游戏月
+    const len = s.log.length;
+    tick(s, 1, true);
+    const m = gameMonths(s);
+    if (m > prevM) {
+      byMonth.set(m, (byMonth.get(m) || 0) + (s.log.length - len));
+      for (const t of s.log.slice(len)) seen.push(t);
+      prevM = m;
+    }
+  }
+  // ⚠️ 用**实得的**月数当期望值：150 次浮点加法未必正好落满 30 个月（差一个 ULP 就少一个月）
+  const expect = gameMonths(s) - startM;
+  need(byMonth.size === expect, `${expect} 个游戏月只落了 ${byMonth.size} 个月的快讯`);
+  need(seen.length === expect, `快讯条数 ${seen.length} ≠ 月数 ${expect}`);
+  const bad = [...byMonth.entries()].filter(([, v]) => v !== 1);
+  need(bad.length === 0,
+    `有话月份不是恰好一条：${bad.map(([m, v]) => `${m} 月 ×${v}`).join(' ')}`);
+  // 静音也算：订单是自动交付的、年度报告还在跑，一个都不许漏进日志
+  const noise = seen.filter(t => /^【订单|^【决策|^【世界第|^【决胜|^\d{4}\s*年【/.test(t));
+  need(noise.length === 0, `回味期日志里混进了非市场文案：${noise[0]}`);
+  const ns = seen.find(t => typeof t !== 'string');
+  need(ns === undefined, `回味期日志里出现了非字符串条目：${JSON.stringify(ns)}`);
+  const over = seen.filter(t => units(t) > 46);
+  need(over.length === 0,
+    `有 ${over.length} 条快讯超过 46 单位${over.length ? `：${over[0]}（${units(over[0])}）` : ''}`);
+  need(s.log.length === seen.length, '日志条数与逐月增量对不上（有别的路径在写）');
+  return `${expect} 个月 × 1 条 · 最长 ${Math.max(...seen.map(units))}/46 单位`;
 });
 
 probe('两步删档：第一次只改文案，第二次才真删', () => {

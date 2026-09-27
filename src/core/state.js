@@ -28,10 +28,18 @@ export function createState() {
     /** 最后一次 tick 注入的真实时间戳（毫秒）—— 离线结算的唯一真相源 */
     lastSeen: Date.now(),
     /**
-     * 进度钟缓存：`阶段起点 + 阶段内市值进度 × 5 年`（由 `engine.tick` 每帧写、由 `format.gameMonths` 读）。
-     * **不入存档** —— 它完全由市值派生，读档后第一帧就会重算（见 `save.applyOffline`）。
+     * 进度钟缓存（由 `engine.tick` 每帧写、由 `format.gameMonths` 读）。
+     * **正篇不入存档** —— 它完全由市值派生，读档后第一帧就会重算（见 `save.applyOffline`）。
+     * ⚠️ **回味期（登顶后）例外，必须存**：那时它由**真实秒**推进（1 真实分钟 = 1 游戏年），
+     *    从市值**算不回来** —— 不存的话读档后它从 0 重来，`worldTick` 会把世界重建回 2026 年。
+     *    剥离只发生在非结局档，见 `serialize`。
      */
     calMonth: 0,
+    /**
+     * 登顶那一刻的游戏月（`u` 的唯一依据，见 `content.SAVOR_RAMP_MONTHS`）。
+     * 默认 0：旧档合并后拿到 0，而 `ending` 为 null 的旧档根本不走回味分支 ⇒ 0 从不被读。
+     */
+    topMonth: 0,
 
     stage: 1,
     money: 0,
@@ -83,7 +91,7 @@ export function createState() {
      * 订单（`orders.js`）：`next` = 下一条要生成的序号（第 n 条在第 `n × 6` 个月出现），
      * `live` = 在手 `[{ uid, tier, born }]`，上限 `ORDER_SLOTS` 条，`done` = 累计交付数。
      * 只存这几个原始事实，「还有几个月到期 / 值多少钱」都是派生量。
-     * ⚠️ `done` 是 2026-09-27 补的纯计数（界面右上角「已完成 N 项」）——`migrate` 的
+     * ⚠️ `done` 是 2026-09-27 补的纯计数（界面右上角「已完成 N 单」）——`migrate` 的
      *    `{ ...fresh.orders, ...(data.orders || {}) }` 已经会让旧档拿到 0，**不必升版本**。
      */
     orders: { next: 0, live: [], done: 0 },
@@ -104,9 +112,23 @@ export function createState() {
 
 /** 序列化：去掉运行时派生字段，裁日志 */
 export function serialize(s) {
-  // 不存：`calMonth`（进度钟缓存）、`orderWin`（订单日志的归并窗口，见 orders.js）
-  const { calMonth, orderWin, ...save } = s;
-  return JSON.stringify({ ...save, savedAt: Date.now(), log: s.log.slice(-40) });
+  /**
+   * 不存：`calMonth`（进度钟缓存，**回味期例外**，见下）、`orderWin`（订单日志的归并窗口）、
+   * `savorCap`（回味期市值的派生缓存，读档后第一帧由 `worldTick` 重算 ——
+   * **包括封顶之后**，那一条路由 `engine.tick` 的封顶出口补算，否则它会永远是 0）。
+   *
+   * ⚠️ `calMonth` 只在 `s.ending`（回味期）时留：
+   *    正篇里它完全由市值派生（`save.applyOffline` 读档时重算得到），存了反而多一处可能撒谎的字段；
+   *    回味期里它由**真实秒**推进、**算不回来**，不存 ⇒ 读档后日历从 0 重来、
+   *    世界被 `worldTick` 重建回 2026 年（名次与榜单全废）。
+   */
+  const { calMonth, orderWin, savorCap, ...save } = s;
+  return JSON.stringify({
+    ...save,
+    ...(s.ending ? { calMonth } : {}),
+    savedAt: Date.now(),
+    log: s.log.slice(-40),
+  });
 }
 
 /** 反序列化 + 版本迁移 */

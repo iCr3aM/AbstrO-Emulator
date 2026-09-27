@@ -393,18 +393,26 @@ check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.en
   const elapsed = s.elapsed;
   const stage = s.stage;
   const lv = lineLevel(s, 'r');
-  setTab(1);                                     // 登顶后要看的「投资线按钮」在「公司」页（两条资产线）
+  setTab(1);                                     // 故意停在「公司」页：正文应被锁回市值榜
   draw();
   const btns = buttonsIn(app.innerHTML);
   const buys = btns.filter(b => b.data.buy !== undefined);
   const speeds = btns.filter(b => b.data.speed !== undefined);
+  const tabs = btns.filter(b => b.data.tab !== undefined);
+  const onTabs = tabs.filter(t => !t.disabled);
   check('登顶后：旧版「已登顶 · 时间冻结」提示已经让位给「退休」横条',
     !app.innerHTML.includes('已登顶 · 时间冻结') && btns.some(b => b.data.retire !== undefined));
-  check('登顶后：投资线按钮全部 disabled，且倍速按钮**已经整组撤掉**（只剩回看 ＋ ⚙）',
-    buys.length === 2 && speeds.length === 0 && buys.every(b => b.disabled),
-    `投资线 ${buys.filter(b => b.disabled).length}/2、倍速 ${speeds.length} 个（应为 0）`);
+  check('登顶后：正文锁在市值榜 —— 投资线 / 倍速根本不渲染，四个页签只剩市值榜可点',
+    buys.length === 0 && speeds.length === 0 && /class="rank"/.test(app.innerHTML)
+    && !/class="lines"/.test(app.innerHTML)
+    && onTabs.length === 1 && onTabs[0].data.tab === '3',
+    `投资线 ${buys.length}、倍速 ${speeds.length}、可点页签 ${onTabs.map(t => t.label).join('/') || '无'}`);
   // 真派发一次 pointerdown：disabled 的元素必须被 bind.js 直接跳过
-  if (buys[0]) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(buys[0]) }));
+  const offTab = tabs.find(t => t.disabled);
+  if (offTab) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(offTab) }));
+  draw();
+  check('登顶后：点 disabled 的「公司」页签不生效（bind.js 直接跳过）',
+    /class="rank"/.test(app.innerHTML) && !/class="lines"/.test(app.innerHTML));
   tick(s, 600);                                  // 非实时会话：10 分钟的等效时间，不许发生任何事
   check('登顶后（非实时会话）：点击 + 600 秒 tick 后现金/时间/等级/阶段一个都没动',
     s.money === money && s.elapsed === elapsed && s.stage === stage && lineLevel(s, 'r') === lv);

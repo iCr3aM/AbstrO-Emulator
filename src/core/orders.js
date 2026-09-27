@@ -82,7 +82,7 @@ export const hasHot = s => liveOf(s).some(isHot);
 export const liveOf = s => (s.orders && s.orders.live) || [];
 export const liveCount = s => liveOf(s).length;
 /**
- * 累计交付过的订单数（含到期自动交付）—— 界面右上角那枚「已完成 N 项」。
+ * 累计交付过的订单数（含到期自动交付）—— 界面右上角那枚「已完成 N 单」。
  * 它**没有任何机械效果**（订单只给现金），只是「这家公司一直在干活」的手感。
  */
 export const doneCount = s => (s.orders && s.orders.done) || 0;

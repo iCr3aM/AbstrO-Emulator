@@ -15,13 +15,15 @@
 import {
   ACTS, PENDING_CAP, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, MILESTONES,
   AUTO_DECIDE_STAGE, DIL_MIN, DIL_AT, SAVOR_RATE,
+  SAVOR_MONTHS_PER_MIN, SAVOR_END_MONTH, SAVOR_MKT_LINES, SAVOR_US_LINES, SAVOR_RIVAL_LINES,
+  CYCLE_MONTHS, CYCLE_RISE, CYCLE_CRASH,
   eventsFor, eventById, companyName,
 } from './content.js';
 import { rates, derived, purchase, lowestLine, costFor, spendableOf } from './economy.js';
 import { financeTick, isListed } from './finance.js';
 import { ordersTick } from './orders.js';
-import { worldTick } from './world.js';
-import { calMonthOf, gameYear, gameMonths } from './format.js';
+import { worldTick, ranking, cycleNotes, shortName } from './world.js';
+import { calMonthOf, gameYear, gameMonths, fmt } from './format.js';
 
 /**
  * 日志保留条数（存档里只留最后 40 条，见 `state.serialize`）。
@@ -291,6 +293,84 @@ export function dilate(s) {
   return 1 - (1 - DIL_MIN) * w;
 }
 
+// ─────────────────────────── 回味期的月度市场快讯 ───────────────────────────
+/**
+ * 每跨一个游戏月落**一条**市场快讯（第九批 §5）—— 这是回味期日志栏里唯一的内容。
+ *
+ * 五类**按优先级**：①②（黑天鹅 / 大盘·特殊）直接复用 `world.js` 的池子 ——
+ * `cycleNotes(m − 1, m, w)` 恰好给出「第 m 月」那一条，命中就用它；没命中就从
+ * ③④⑤（大盘·常规 / 我们 / 对手）里按月轮转。于是 240 个月的回味期**月月有文案**，
+ * 而且不会出现「同一个月两条」。
+ *
+ * ⚠️ 只在 `engine.tick` 的回味分支调用：`worldTick` 那边已经关掉了 `cycleNotes`
+ *    （见那里的注释），两边不会打架。
+ */
+function savorNews(s, fromMonth, toMonth) {
+  const mTo = Math.floor(toMonth);
+  for (let m = Math.floor(fromMonth) + 1; m <= mTo; m++) {
+    const special = cycleNotes(m - 1, m, s.world);
+    const line = special.length ? special[0] : savorRegular(m, s);
+    if (line) s.log.push(line);
+  }
+}
+
+/** ③④⑤ 按月轮转 —— 每月恰好占一类，相邻月不重类 */
+function savorRegular(m, s) {
+  const cls = ((m % 3) + 3) % 3;
+  if (cls === 0) return marketLine(m);
+  if (cls === 1) return usLine(m, s);
+  return rivalLine(m, s);
+}
+
+/**
+ * ③ 大盘·常规：按**当月水位与斜率**说 —— 六个档与 `cycleAt` 的锯齿四段严格对齐
+ * （缓涨 u<57 / 见顶 u=57 / 崩盘 58~59 / 缓跌 60~116 / 低谷 u=117 / 回暖 118~119）。
+ */
+function marketLine(m) {
+  const pool = SAVOR_MKT_LINES[marketPhase(m)];
+  return pool[m % pool.length];
+}
+
+/**
+ * ④ 我们：说自己的市值与「比第二名高多少」。
+ * 涨 / 跌看**上一个月**的环比（`s.worldPrevCap` 由 `worldTick` 在跨月那一刻快照）。
+ */
+function usLine(m, s) {
+  const cur = s.worldCap || 0;
+  const prev = s.worldPrevCap != null ? s.worldPrevCap : cur;
+  const rival = ranking(s.world, cur, 2, prev).all.find(c => !c.me);
+  if (!rival) return null;
+  const mom = prev > 0 ? (cur / prev - 1) : 0;
+  const p = Math.abs(Math.round(mom * 100));
+  if (marketPhase(m) === 'crash') return SAVOR_US_LINES.crash(fmt(s.savorCap || 0), p);
+  if (mom < 0) return SAVOR_US_LINES.down(fmt(s.savorCap || 0), p);
+  const higher = rival.cur > 0 ? Math.round((cur / rival.cur - 1) * 100) : 0;
+  return SAVOR_US_LINES.up(fmt(s.savorCap || 0), higher);
+}
+
+/** ⑤ 对手：点名榜上紧贴我们的那一家（玩家恒为第 1 ⇒ 它就是第二名），说它本月涨跌 */
+function rivalLine(m, s) {
+  const cur = s.worldCap || 0;
+  const prev = s.worldPrevCap != null ? s.worldPrevCap : cur;
+  const rival = ranking(s.world, cur, 2, prev).all.find(c => !c.me);
+  if (!rival) return null;
+  const p = Math.abs(Math.round(rival.mom * 100));
+  return rival.mom < 0
+    ? SAVOR_RIVAL_LINES.down(shortName(rival.n), p)
+    : SAVOR_RIVAL_LINES.up(shortName(rival.n), p);
+}
+
+/** 当月处在 `cycleAt` 锯齿的哪一段 —— ③ 与 ④ 共用同一套判据 */
+function marketPhase(m) {
+  const u = ((m % CYCLE_MONTHS) + CYCLE_MONTHS) % CYCLE_MONTHS;
+  if (u === CYCLE_RISE) return 'top';
+  if (u < CYCLE_RISE) return 'rise';
+  if (u < CYCLE_RISE + CYCLE_CRASH) return 'crash';
+  if (u === CYCLE_MONTHS - CYCLE_CRASH) return 'trough';
+  if (u < CYCLE_MONTHS - CYCLE_CRASH) return 'dip';
+  return 'rebound';
+}
+
 // ─────────────────────────── tick ───────────────────────────
 /**
  * @param {object} s   状态
@@ -312,6 +392,24 @@ export function tick(s, dtReal = 0.1, live = false) {
    * 放在最前面 —— 只有这一个出口才可能把「暂停」漏掉半件事。
    */
   if (s.ending && !live) return { R: rates(s), D: derived(s) };
+
+  /**
+   * 回味期跑到头：日历封顶 `SAVOR_END_MONTH`（2086-08）后**彻底静止**。
+   *
+   * 起点是登顶那月的 480，回味期 12 游戏月 / 真实分钟 ⇒ 最多再看 20 真实分钟就停。
+   * 此后日期、经营、世界榜一起定住 —— 这就是「挂机一整个月会怎么样」的答案：
+   * **什么也不会发生**（后台标签页的 rAF 本就不跑；即便一直盯着，20 分钟后也到这个出口）。
+   *
+   * ⚠️ **但 `savorCap` 必须在这里补算一次**：它是**派生缓存、不入存档**（见 `state.serialize`），
+   *    而下面两个出口都不再调 `worldTick`（它是唯一的写入点）⇒ 封顶后的存档读回来时它恒为 0，
+   *    `derived()` 于是退回**未锚定的** `marketCapBase × valAt`（实测 118 T → 259 T）**且永不自愈**
+   *    —— 每一帧都在第一行就返回，再也不会有人写它。所以：还是 0 就把世界这一趟补上
+   *    （此时它什么也不推进，只写这一个数），之后每帧都只是读。
+   */
+  if (s.ending && s.calMonth >= SAVOR_END_MONTH) {
+    if (!(s.savorCap > 0)) worldTick(s, rates(s));
+    return { R: rates(s), D: derived(s) };
+  }
 
   /**
    * 真实秒 → 游戏秒：
@@ -336,6 +434,39 @@ export function tick(s, dtReal = 0.1, live = false) {
   R = rates(s);
   const D = derived(s, R);
 
+  /**
+   * ── 回味期（第九批 · 登顶后）──
+   * 日历改由**真实秒**驱动：1 真实分钟 = `SAVOR_MONTHS_PER_MIN` 游戏月（= 1 游戏年），
+   * 封顶 `SAVOR_END_MONTH`（2086-08）。
+   * ⛔ **不再走 `calMonthOf`**：它是「市值进度钟」（市值 → 月），而回味期的市值锚在世界榜上、
+   *    又由真实时间推进 —— 继续用它，日历会随真实时间**指数级**飙（实测挂 3 小时 +75 个月）。
+   */
+  if (s.ending) {
+    const from = s.calMonth;
+    s.calMonth = Math.min(SAVOR_END_MONTH, s.calMonth + (dtReal * SAVOR_MONTHS_PER_MIN) / 60);
+
+    /**
+     * 经营**照旧跑**（生产已在上面的 ①、自动购买在 ②；融资与订单在这里）——
+     * 「像正常公司一样发展，只是玩家不能再操作」（用户 2026-09-28）。
+     * 唯一要做的是**静音非市场日志**：年度报告（`【20xx 年】` 与年度决策）、订单文案、
+     * 里程碑、名次播报与决胜回执在回味期都是与市值榜无关的噪声，日志栏只留市场快讯。
+     * 手法：临时把 `s.log.push` 换成丢弃版 —— 只在这一次调用里生效，退出前原样还回去。
+     */
+    const keepPush = s.log.push;
+    s.log.push = () => s.log.length;                 // 静音：下面五个都照跑，只是一个字不落
+    financeTick(s, R, D);
+    ordersTick(s, R);
+    worldTick(s, R);
+    logMilestones(s, D);
+    annualReport(s, R, D);
+    s.log.push = keepPush;
+
+    savorNews(s, from, s.calMonth);                  // 每月一条，五类按优先级
+
+    if (s.log.length > LOG_MAX) s.log.splice(0, s.log.length - LOG_MAX);
+    return { R, D };
+  }
+
   // ④ 进度钟：日历 = 市值在对数轴上的位置（玩得快，时间就走得快）
   //    ⚠️ `calMonthOf` 内部取的是 `D.marketCapBase`（**不含估值周期**）——
   //    估值会让市值跌，而日期永远不许倒退（用户 2026-09-27 的宏观周期，见 economy.derived）
@@ -356,6 +487,11 @@ export function tick(s, dtReal = 0.1, live = false) {
   // 登顶 = 唯一结局的判据（`worldRank` 由 world.js 维护，这里不另算一遍）
   if (!s.ending && s.worldRank === 1) {
     s.ending = 'top';
+    /**
+     * 记下**登顶那一刻的游戏月** —— 回味期 `gap` 的爬坡起点（`u` 的唯一依据）。
+     * 登顶时 `calMonth` 恰好是 480（`calMonthOf` 在末档打满），而日历随后由真实秒推进。
+     */
+    s.topMonth = gameMonths(s);
     // ⚠️ 不再接「上面没有人了。」—— 同一局的名次播报（`【世界第 1】`）已经说了这一句，
     //    两条紧挨着出现是同一件事说两遍（用户 2026-09-27「事件描述避免重复」）。
     s.log.push(`【登顶】${companyName(isListed(s))} 成了世界第一。`);
