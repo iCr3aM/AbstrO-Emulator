@@ -9,20 +9,25 @@
  *   node tools/headless-check.mjs          # A 主动：每年选「对数市值增量最大」的那个选项
  *   node tools/headless-check.mjs --idle   # D 挂机：待决一律按默认（保守项）结算
  *
- * A 路径判「节奏五项」：七幕全部到达、幕弧长都是有限值、严格递增、合计 ∈ CURVE_BAND、
- * 每幕落在 CURVE_MID ± CURVE_TOL 内。
- * D 路径只判四项：能通关 + 递增 + 合计 ∈ IDLE_BAND + 幕弧长可测。
- * 它的逐幕偏差**照打**，但标成「参考」不计入 `bad` —— CURVE_MID 是**主动**路径的曲线，
+ * A 路径判「节奏四项」：八章全部到达、幕弧长都是有限值、合计 ∈ CURVE_BAND、
+ * 每章落在 CURVE_MID ± CURVE_TOL 内。
+ * D 路径只判三项：能通关 + 合计 ∈ IDLE_BAND + 幕弧长可测。
+ * 它的逐章偏差**照打**，但标成「参考」不计入 `bad` —— CURVE_MID 是**主动**路径的曲线，
  * 而挂机走的是「一律选保守项」，要求两条路径落在同一区间等于要求「不做决策不会变慢」。
+ *
+ * ⚠️ **不再判「幕弧长严格递增」**（八章下这条必然破）：一章的购买次数 ∝ 它的 `ln(市值)`
+ *    台阶，而真实营收阶梯的 ln 比率是**递减**的（见 `curve-targets.mjs`）。八章下
+ *    「越往后越长」与「市值阶梯单调」不可能同时成立，所以只守「每章落在目标 ±40%」
+ *    与「合计 ∈ [3,6]」—— 这两条才是玩家真正感受得到的东西。
  *
  * 另有一条与节奏无关、但标定器必须拿到的事实：**登顶在物理上够不够得着**。
  * 判据是「玩家终局市值 ≥ 同一游戏月的榜首」—— 世界榜按**玩家的进度钟**推进，
- * 所以只能拿**玩家收尾那一月**的榜首来比，不能拿第 420 月的（慢玩家会赢在日历打满之前，
+ * 所以只能拿**玩家收尾那一月**的榜首来比，不能拿第 480 月的（慢玩家会赢在日历打满之前，
  * 用它去比会误报「够不着」）。
  * 反过来也守一下上限：玩家不该是同月榜首的 1.25 倍以上 —— 那说明终局线虚高，
- * 最后一幕会在日历打满之前就收尾（节奏会掉出 `CURVE_MID`）。
+ * 最后一章会在日历打满之前就收尾（节奏会掉出 `CURVE_MID`）。
  *
- * 同时把**第 420 月榜首**也报出去：第 7 幕的门槛锚点 `ACTS[7].mcap` 就是照这个数钉的，
+ * 同时把**第 480 月榜首**也报出去：第 8 章的门槛锚点 `ACTS[8].mcap` 就是照这个数钉的，
  * `npm run tune` 要用它守住那条锚点。
  *
  * ⚠️ 本文件末尾**没有** process.exit ⇒ `npm run check` 恒退出 0。
@@ -34,7 +39,7 @@ import {
   ACTS, LINE_IDS, CURVE_RATIO, PENDING_CAP,
 } from '../src/core/content.js';
 import { createState } from '../src/core/state.js';
-import { rates, derived, costFor, lowestLine, peOf } from '../src/core/economy.js';
+import { rates, derived, costFor, lowestLine, peOf, canAffordManual } from '../src/core/economy.js';
 import { tick, pendingEvent, resolvePending, manualBuy } from '../src/core/engine.js';
 import { createWorld, advanceWorld, ranking, toUSD_T } from '../src/core/world.js';
 import { MONTHS_TOTAL, gameMonths } from '../src/core/format.js';
@@ -44,10 +49,10 @@ import { CURVE_BAND, IDLE_BAND, CURVE_MID, CURVE_TOL } from './curve-targets.mjs
 /**
  * 一个选项在**对数市值**上的增量 —— `best` / `worst` 的排序依据。
  *
- * 为什么用对数：市值是乘积形式（`INCOME_SCALE·SEC_PER_YEAR·gen·pe·F·r^(ΣL/3)`），
+ * 为什么用对数：市值是乘积形式（`INCOME_SCALE·SEC_PER_YEAR·gen·pe·F·r^(ΣL/k)`），
  * 只有取对数之后各选项才可加、才跨幕可比。三项一阶效应：
- *   · `cash` c（单位 = 年营收）⇒ 能多买 `c·revenue / cost` 次 ⇒ `Δln = 次数 × ln r / 3`
- *     （每次购买把 `ΣL` 抬 1 ⇒ 市值 ×`r^(1/3)`）
+ *   · `cash` c（单位 = 年营收）⇒ 能多买 `c·revenue / cost` 次 ⇒ `Δln = 次数 × ln r / k`
+ *     （每次购买把 `ΣL` 抬 1 ⇒ 市值 ×`r^(1/k)`，k = 投资线条数 = `LINE_IDS.length`）
  *   · `prod/share/team` 是乘数 ⇒ `Δln = ln(乘数)`
  *   · `pe` 是加法 ⇒ `Δln = ln((pe+Δ)/pe)`
  */
@@ -56,7 +61,7 @@ function logCapDelta(s, eff, R) {
   let d = 0;
   if (eff.cash) {
     const times = (eff.cash * R.revenue) / costFor(s, LINE_IDS[0]);
-    d += (times * Math.log(CURVE_RATIO)) / 3;
+    d += (times * Math.log(CURVE_RATIO)) / LINE_IDS.length;
   }
   for (const k of ['prod', 'share', 'team']) if (eff[k]) d += Math.log(eff[k]);
   if (eff.pe) {
@@ -126,10 +131,12 @@ export function run({ strategy = 'best', step = 1, maxHours = 40, manualClick = 
     tick(s, step);
     t += step;
 
-    // 手动点击：与自动购买同一个 `purchase`，差别只有「玩家指定哪条」+ 一次 MANUAL_GAIN 级
+    // 手动点击：与自动购买同一个 `purchase`，差别只有「玩家指定哪条」+ 一次 MANUAL_GAIN 级。
+    // ⚠️ 门槛是「**可动用现金**（现金 × (1 − 储备比例)）≥ `cost × MANUAL_PAY`」，且用
+    //    `canAffordManual` 与按钮亮度同源 —— 否则这条量尺量的就不是线上那套规则。
     if (manualClick > 0 && steps % manualClick === 0) {
       const id = lowestLine(s);
-      if (s.money >= costFor(s, id)) { manualBuy(s, id); clicks += 1; }
+      if (canAffordManual(s, id)) { manualBuy(s, id); clicks += 1; }
     }
 
     if (decide) {
@@ -151,8 +158,9 @@ export function run({ strategy = 'best', step = 1, maxHours = 40, manualClick = 
 
   const total = durs.reduce((a, x) => a + x, 0);
   const complete = durs.length === ACTS.length - 1 && durs.every(Number.isFinite);
+  // 只作**参考**上报，不参与判定 —— 八章下「越往后越长」与单调的市值阶梯不可能同时成立
   let mono = complete;
-  for (let a = 1; a < durs.length && mono; a++) if (!(durs[a] > durs[a - 1])) mono = false;
+  for (let a = 1; a < durs.length && mono; a++) if (!(durs[a] >= durs[a - 1])) mono = false;
 
   return {
     s, durs, total, complete, mono,
@@ -172,7 +180,7 @@ export function top1At(month) {
   return ranking(w, null, 1).top[0].cur;
 }
 
-/** 第 420 月（2061-09）的榜首（T USD）—— 第 7 幕门槛锚点的参照，标定器也要这个数 */
+/** 第 480 月（2066-08）的榜首（T USD）—— 第 8 章门槛锚点的参照，标定器也要这个数 */
 export function top1AtEnd() {
   return top1At(MONTHS_TOTAL);
 }
@@ -197,7 +205,7 @@ const strict = !IDLE;
 const t0 = Date.now();
 const res = run({ strategy, manualClick: CLICK });
 const months = gameMonths(res.s);
-const top1USD = top1AtEnd();      // 第 420 月（锚点参照）
+const top1USD = top1AtEnd();      // 第 480 月（锚点参照）
 const top1Now = top1At(months);   // 玩家收尾那一月（可达性判据）
 const playerUSD = toUSD_T(res.cap);
 
@@ -217,13 +225,12 @@ const maxDev = res.complete
   : NaN;
 
 const problems = [];
-if (!res.complete) problems.push(`有幕未到达（拿到 ${res.durs.length}/${ACTS.length - 1} 幕）或弧长不可测`);
-if (!res.mono) problems.push('幕弧长并非严格递增');
+if (!res.complete) problems.push(`有章未到达（拿到 ${res.durs.length}/${ACTS.length - 1} 章）或弧长不可测`);
 if (!(res.total >= band[0] && res.total <= band[1])) problems.push(`合计 ${res.total.toFixed(2)}h 出带 [${band[0]}, ${band[1]}]`);
 if (res.ending !== 'top') problems.push(`未走到唯一结局「登顶」（ending = ${res.ending ?? 'null'}）`);
 if (strict && res.complete) {
-  for (let a = 1; a <= 7; a++) {
-    if (Math.abs(dev(a)) > CURVE_TOL) problems.push(`第 ${a} 幕偏差 ${(dev(a) * 100).toFixed(0)}% 超 ±${(CURVE_TOL * 100).toFixed(0)}%`);
+  for (let a = 1; a <= 8; a++) {
+    if (Math.abs(dev(a)) > CURVE_TOL) problems.push(`第 ${a} 章偏差 ${(dev(a) * 100).toFixed(0)}% 超 ±${(CURVE_TOL * 100).toFixed(0)}%`);
   }
 }
 const capRatio = playerUSD / top1Now;
@@ -238,9 +245,9 @@ out.push(`  节奏量尺 · ${IDLE ? 'D 挂机' : 'A 主动'}路径 ｜ 策略 $
   + ` ｜ ${(Date.now() - t0) / 1000}s ｜ 逻辑步数 ${res.steps}`);
 out.push('═'.repeat(88));
 out.push('');
-out.push('  幕  地点            实测       目标         偏差      判定');
+out.push('  章  地点            实测       目标         偏差      判定');
 out.push('  ' + '─'.repeat(82));
-for (let a = 1; a <= 7; a++) {
+for (let a = 1; a <= 8; a++) {
   const h = res.durs[a - 1];
   const mid = CURVE_MID[a];
   const d = dev(a);
@@ -255,12 +262,12 @@ for (let a = 1; a <= 7; a++) {
 out.push('  ' + '─'.repeat(82));
 out.push(`  合计 ${res.total.toFixed(2)}h ／ 目标 ${CURVE_MID.slice(1).reduce((a, b) => a + b, 0).toFixed(2)}h`
   + ` ／ 带宽 [${band[0]}, ${band[1]}]h → ${res.total >= band[0] && res.total <= band[1] ? '✅ 达标' : '❌ 出带'}`);
-out.push(`  单调递增 → ${res.complete ? (res.mono ? '✅' : '❌') : '❌不可测'}`
+out.push(`  非递减（参考） → ${res.complete ? (res.mono ? '✅' : '—') : '❌不可测'}`
   + ` ｜ 最大逐幕偏差 ${Number.isFinite(maxDev) ? (maxDev * 100).toFixed(0) + '%' : '—'}`
   + `（容差 ±${(CURVE_TOL * 100).toFixed(0)}%）`);
 out.push(`  决策 ${res.decisions} 次 ｜ 积压超限按默认结算 ${res.overflowed} 条 ｜ 余留待决 ${res.pendingLeft}/${PENDING_CAP}`);
 out.push(`  终局：${res.ending === 'top' ? '登顶 ✅' : '未登顶 ❌'} ｜ 市值 ${fmtN(res.cap)} 元 = ${playerUSD.toFixed(1)}T USD`);
-out.push(`  第 420 月榜首 ${top1USD.toFixed(1)}T USD ／ 玩家终局 ${playerUSD.toFixed(1)}T USD（第 ${months} 月，同月榜首 ${top1Now.toFixed(1)}T）`
+out.push(`  第 480 月榜首 ${top1USD.toFixed(1)}T USD ／ 玩家终局 ${playerUSD.toFixed(1)}T USD（第 ${months} 月，同月榜首 ${top1Now.toFixed(1)}T）`
   + ` ／ 终局线 ${capRatio.toFixed(3)}× → ${capRatio >= 1 && capRatio <= 1.25 ? '✅ 登顶可达且不虚高' : '❌ 见下'}`);
 out.push('');
 out.push(`  问题数 bad = ${problems.length}`);

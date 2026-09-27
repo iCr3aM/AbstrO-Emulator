@@ -5,7 +5,7 @@
  */
 
 // 时间轴换算：一游戏年 = `SEC_PER_YEAR` 个游戏秒（GDD 16/2.4 的时间轴基准）。
-// 这里**不写死数值**：`SEC_PER_YEAR` 是标定量（一局 3–6h / 35 年，目标见 `tools/curve-targets.mjs`），
+// 这里**不写死数值**：`SEC_PER_YEAR` 是标定量（一局 3–6h / 40 年，目标见 `tools/curve-targets.mjs`），
 // 写死的话每次重新标定它都会在旁边留一句假话。
 // ⚠️ 2026-09-26 第二批 §2.6：日历改由**幕次 + 幕内市值进度**派生（进度钟），
 //    幕的年份区间（`ACTS[].years`）重新成为日历的真相源 ⇒ 本文件重新 import `ACTS`。
@@ -66,7 +66,7 @@ export function fmtShort(n) {
  *    ④ 第四版（本版 · 进度钟）：日历 = **幕次 + 幕内市值进度**。
  *      `p = clamp(市值 / 本幕门槛, 0, 1)`，月数在本幕的 `ACTS[].years` 区间里插值。
  *      ⇒ 玩得快，时间就走得快；玩得慢，时间就走得慢；卡在某一幕时**世界与你一起冻结**。
- *      ⇒ 第 8 幕打满（`p = 1`）**恰好**是 2061 年 8 月 = 结局 ——「玩到最后时间刚刚好是结局」。
+ *      ⇒ 第 8 幕打满（`p = 1`）**恰好**是 2066 年 8 月 = 结局 ——「玩到最后时间刚刚好是结局」。
  *
  * `s.elapsed` **仍然存在、仍然累加真实秒**（离线结算 / 融资到点 / 日志锚定靠它），
  * 但它不再驱动日历与世界榜；日历的缓存字段是 `s.calMonth`（`engine.tick` 每帧写入）。
@@ -75,18 +75,20 @@ export function fmtShort(n) {
  *      并把「幕内插值」换成**全局锚点插值** —— 因为前者在幕边界会**倒退**：
  *      跨幕那一瞬市值 ≈ `mcap[j-1]`，而 `p = 市值 / mcap[j]` 立刻掉到 `1/比值`（本版阶梯上 1/5 ~ 1/1200）
  *      ⇒ 每跨一幕日历往回跳两三年。改成「对数市值轴上的全局分段线性」后：
- *      锚点 `(START_MCAP → 0 月)`、`(ACTS[j].mcap → 60j 月)`，市值单调 ⇒ 月份单调，绝不倒退。
+ *      锚点 `(START_MCAP → 0 月)`、`(ACTS[j].mcap → 第 j 章末月)`（末月由 `ACTS[].years` 解析，
+ *      八章跨度不等 ⇒ 不再假设「每章整 5 年」），市值单调 ⇒ 月份单调，绝不倒退。
  *      玩法语义**不变**：玩得快时间走得快；卡在某一幕时，时间与世界一起冻结。
  */
 const START_UTC = Date.UTC(2026, 7, 9);              // 2026-08-09
 const MS_PER_YEAR = 365.25 * 24 * 3600 * 1000;
-export const TOTAL_YEARS = 35;                        // GDD 2.4：2026–2061（engine tick 的跨年日志分隔也用）
-export const MONTHS_TOTAL = TOTAL_YEARS * 12;         // 420
 
 /**
- * 每一幕的**月区间** `[起, 止]`（相对 2026-08 的月数），解析自 `ACTS[].years`。
- * 八幕首尾相接，末值 = `MONTHS_TOTAL`（420 = 2061-08）—— 所以「幕次 → 月」只有这一份数据。
+ * 每一章的**月区间** `[起, 止]`（相对 2026-08 的月数），解析自 `ACTS[].years`。
+ * 八章首尾相接，末值 = 480（2066-08）—— 所以「章次 → 月」只有这一份数据。
  * 索引与 `ACTS` 对齐（第 0 位是 null）。
+ *
+ * ⚠️ 八章的年份跨度**不相等**（4/4/5/5/5/5/6/6 年），所以日历锚点绝不能再用
+ *    `(i+1) * 60` 这种「每章整 5 年」的写法 —— 那会让第 4 章之后的每一个日期都错位。
  */
 export const ACT_MONTHS = ACTS.map(a => {
   if (!a) return null;
@@ -94,19 +96,28 @@ export const ACT_MONTHS = ACTS.map(a => {
   return m ? [(Number(m[1]) - 2026) * 12, (Number(m[2]) - 2026) * 12] : [0, 0];
 });
 
+/** 全程月数（末章的终点月）= 480；年份 = 40。**由 `ACTS[].years` 派生**，不手写。 */
+export const MONTHS_TOTAL = ACT_MONTHS[ACT_MONTHS.length - 1][1];
+export const TOTAL_YEARS = Math.round(MONTHS_TOTAL / 12);
+
 /**
- * 进度钟锚点：`[市值, 月数]`。第 0 个是「开局市值 → 0 月」，第 j 个是 `(mcap[j] → 60j 月)`。
+ * 进度钟锚点：`[市值, 月数]`。第 0 个是「开局市值 → 0 月」，第 j 个是 `(mcap[j] → 第 j 章末月)`。
  * 门槛阶梯由标定器保证**严格递增**（见 content.js 顶部说明），所以这条链天然单调。
  */
-const CLOCK = [[START_MCAP, 0], ...ACTS.slice(1).map((a, i) => [a.mcap, (i + 1) * 60])];
+const CLOCK = [[START_MCAP, 0], ...ACTS.slice(1).map((a, i) => [a.mcap, ACT_MONTHS[i + 1][1]])];
 
 /**
  * 当前市值对应的**日历月数** —— 对数市值轴上的分段线性插值（单调 ⇒ 日期只前进不后退）。
+ *
+ * ⚠️ 2026-09-27：读的是 `D.marketCapBase`（**不含估值周期**），不是 `D.marketCap`。
+ *    估值周期会让市值跌 25%，而「日期倒退」是硬禁止的（`tools/probes.mjs` 有断言）。
+ *    日历记的是**公司走到哪一步**，不是**市场今天肯给多少钱** —— 所以这里一律优先取 base，
+ *    调用方哪怕传的是完整的 `derived(s)` 也不会误用带周期的那个数。
  * @param s 只用 `s.calMonth` 的容器身份（本函数的输出**要写回** `s.calMonth`，见 `engine.tick`）
- * @param D `derived(s)` 的结果（只要 `marketCap`）—— 由调用方算，避免 format → economy 的环。
+ * @param D `derived(s)` 的结果 —— 由调用方算，避免 format → economy 的环。
  */
 export function calMonthOf(s, D) {
-  const cap = Math.max(CLOCK[0][0], (D && D.marketCap) || 0);
+  const cap = Math.max(CLOCK[0][0], (D && (D.marketCapBase ?? D.marketCap)) || 0);
   const x = Math.log(cap);
   for (let i = 1; i < CLOCK.length; i++) {
     const [c0, m0] = CLOCK[i - 1];
@@ -120,7 +131,7 @@ export function calMonthOf(s, D) {
 }
 
 /**
- * 游戏内已经过去多少个月（0 起，封顶 420）。
+ * 游戏内已经过去多少个月（0 起，封顶 480）。
  * @param s 存档状态。只读 `s.calMonth` 一个**派生**字段（由 `engine.tick` 每帧写入）。
  *          没写过时按 0 处理 —— 新档第一帧渲染出来就是 2026 年 8 月，与起点一致。
  */
@@ -137,9 +148,9 @@ export function gameDate(s) {
 }
 
 /**
- * 当前处在第几个游戏年（**1..35**）—— 探针会用到。
- * ⚠️ 夹取上限是 `TOTAL_YEARS - 1` 再加 1：month 420（第 35 年末）是第 **35** 年，不是第 36 年。
- *    原实现写成 `Math.min(TOTAL_YEARS, ...) + 1`，在终点会返回 36 —— 只是以前从没走到那一格。
+ * 当前处在第几个游戏年（**1..40**）—— 探针会用到。
+ * ⚠️ 夹取上限是 `TOTAL_YEARS - 1` 再加 1：month 480（第 40 年末）是第 **40** 年，不是第 41 年。
+ *    原实现写成 `Math.min(TOTAL_YEARS, ...) + 1`，在终点会返回 41 —— 只是以前从没走到那一格。
  */
 export const gameYear = s =>
   Math.min(TOTAL_YEARS - 1, Math.floor(gameMonths(s) / 12)) + 1;

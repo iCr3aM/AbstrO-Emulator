@@ -68,21 +68,27 @@ installHarness();
 /* ─────────────────────────── 被测模块（线上代码，不是副本）─────────────────────────── */
 import {
   ACTS, LINES, LINE_IDS, EVENTS, eventsFor, eventById, PENDING_CAP, IPO_LINE,
-  CURVE_RATIO, LINE_GROWTH, INCOME_SCALE, GENERATION, SEC_PER_YEAR,
-  OFFLINE_CAP_SEC, OFFLINE_MODIFIER, PE_MIN, PE_MAX, PE_BASE, START_MCAP,
-  FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName,
-  AUTO_BUY_RESERVE, MANUAL_GAIN, FOCUS, FOCUS_EVEN, FOCUS_LAG, AUTO_DECIDE_STAGE,
+  CURVE_RATIO, LINE_GROWTH, INCOME_SCALE, SEC_PER_YEAR, RESERVE_FRAC, MILESTONES,
+  OFFLINE_CAP_SEC, OFFLINE_MODIFIER, PE_MIN, PE_MAX, PE_BASE, START_MCAP, LINE_COST0,
+  valAt, winterAt, cycleAt, VAL_CYCLE_AMP, COST_CYCLE_AMP, CYCLE_MONTHS, ORDER_TIERS,
+  FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, lineName,
+  AUTO_BUY_RESERVE, AUTO_BUY_RESERVE_EARLY, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, AUTO_DECIDE_STAGE,
 } from '../src/core/content.js';
 import {
-  rates, derived, costOf, costFor, purchase, lineLevel,
-  generationOf, peOf, sharePctOf, marketRevenueOf, lowestLine,
+  rates, derived, costOf, costFor, purchase, lineLevel, manualCostOf, canAffordManual,
+  peOf, sharePctOf, lowestLine, spendableOf, reserveOf, tamOf, TAM0, TAM_GROWTH,
 } from '../src/core/economy.js';
 import {
+  ordersTick, deliverOrder, ORDER_SLOTS, ORDER_EVERY_MONTHS,
+  ORDER_LIFE_MONTHS, HOT_TIER, AUTO_DELIVER, liveOf, liveCount, hasHot, monthsLeftOf, valueOf,
+  doneCount,
+} from '../src/core/orders.js';
+import {
   tick, pendingEvent, resolvePending, applyEffect, stageGoalMet, offlineRun, LOG_MAX,
-  manualBuy, setFocus,
+  manualBuy,
 } from '../src/core/engine.js';
 import { ROUNDS, isListed } from '../src/core/finance.js';
-import { evaluateRetirement, ENDING_TEXT } from '../src/core/endings.js';
+import { ENDING_TEXT, evaluateRetirement } from '../src/core/endings.js';
 import { applyOffline, save, load, wipe, disableSave, enableSave } from '../src/core/save.js';
 import {
   createState, serialize, deserialize, SAVE_KEY, SAVE_VERSION,
@@ -91,7 +97,7 @@ import {
   gameDate, gameYear, gameMonths, calMonthOf, ACT_MONTHS, MONTHS_TOTAL, TOTAL_YEARS,
 } from '../src/core/format.js';
 import {
-  createWorld, advanceWorld, ranking, worldDate, worldTick, toUSD_T, RMB_PER_T_USD,
+  createWorld, advanceWorld, ranking, worldDate, worldTick, toUSD_T, RMB_PER_T_USD, cycleNotes,
 } from '../src/core/world.js';
 import {
   render, renderOffline, renderSettings, renderEnding, renderNotTop, closeModal, setTab,
@@ -154,6 +160,12 @@ function look(s) {
   return buttonsIn(root.innerHTML);
 }
 /**
+ * 页签下标 —— 与 `render.js` 的 `TABS` 同序（**创始人 / 公司 / 订单 / 市值榜**）。
+ * 探针里不裸写数字：2026-09-27 调换过前两个页签，裸写的地方全要跟着改一遍。
+ */
+const TAB_FOUNDER = 0, TAB_COMPANY = 1, TAB_ORDER = 2, TAB_RANK = 3;
+
+/**
  * 渲染**指定页签**并解析按钮。
  * ⚠️ 页签是 `render.js` 的模块级交互态，会跨探针残留 —— 凡是依赖「哪一页」的断言
  *    都必须显式 `setTab()`，不能沿用上一条探针留下的页。
@@ -169,17 +181,25 @@ function lookOverlay(html) { return buttonsIn(html); }
 function midState(stage = 3, level = 30) {
   const s = createState();
   s.stage = stage;
-  s.lines = { r: level, m: level, h: level };
+  s.lines = bal(level);
   tick(s, 0);        // dt=0：只建世界表 / 写进度钟 / 发第 1 年年报，不推进生产
   return s;
 }
+
+/**
+ * 五条线同级的「均衡档」（`n = ΣL/5`）—— **所有 fixture 都必须用它**。
+ * ⚠️ 手写 `{ r: 30, m: 30, h: 30 }` 会把新增的 `c/d` 留成 0 级：
+ *    收入少掉两个因子、`年营收/cost` 那条常数不变式直接失效 —— 而这不代表代码错了。
+ */
+const bal = n => Object.fromEntries(LINE_IDS.map(id => [id, n]));
 
 /** 一个选项在**对数市值**上的增量 —— 与 headless-check 同一口径（挑最优项用） */
 function logCapDelta(s, eff) {
   if (!eff) return 0;
   const R = rates(s);
   let d = 0;
-  if (eff.cash) d += ((eff.cash * R.revenue) / costFor(s, LINE_IDS[0])) * Math.log(CURVE_RATIO) / 3;
+  // 一笔现金能买几级 × 每级的对数市值增量（ln g = ln r / 线数）
+  if (eff.cash) d += ((eff.cash * R.revenue) / costFor(s, LINE_IDS[0])) * Math.log(CURVE_RATIO) / LINES.length;
   for (const k of ['prod', 'share', 'team']) if (eff[k]) d += Math.log(eff[k]);
   if (eff.pe) d += Math.log(Math.max(1e-9, (peOf(s) + eff.pe) / peOf(s)));
   return d;
@@ -200,12 +220,26 @@ function play(strategy = 'best', maxSeconds = 60 * 3600) {
    * `last` = 最后一次看到这一幕的时刻（幕长），`hit` = 目标首次成立。
    */
   const marks = {};
+  /**
+   * 逐 tick 记录**玩家看到的市值** —— 「低谷可见」那条探针要用它。
+   * `{ m: 游戏月, v: 市值, rev: 年营收, va: valAt(月), pe: 市盈率 }`：后三个只在报红时印出来，
+   * 好让读的人一眼看出那一段是「估值周期砸的」还是「自动购买停摆砸的」（两种都在设计里）。
+   *
+   * ⚠️ 必须**逐 tick**，不能按月采样：日历是 `marketCapBase` 的分段对数插值，
+   *    而年度决策会改 PE ⇒ base 一跳，日历就**跳过**某个月（月度采样点落空）。
+   *    落空之后「补最近一个月」的写法会把**两个月的变化**记成**一个月的变化**，
+   *    于是一段低谷被劈成两段、还凭空多出几个假低谷（实测：4 段被量成 7 段）。
+   *    逐 tick 之后每个月有几十个采样点，下降沿是一整段连续采样 —— 与 `STEP`、倍速都无关。
+   */
+  const caps = [];
   while (!s.ending && t < maxSeconds) {
     t += STEP;
     tick(s, STEP);
     const a = s.stage;
     const m = (marks[a] = marks[a] || { first: t, last: t });
     m.last = t;
+    const D0 = derived(s);
+    caps.push({ m: gameMonths(s), v: D0.marketCap, pe: D0.pe, rev: D0.revenue, va: valAt(gameMonths(s)) });
     /**
      * ⚠️ 必须在 tick **之后**重算 R/D 再判目标：`tick` 内部是先算 D（此时还是上一幕的市场）
      *    再 `advanceStage`，所以它返回的那对 (R, D) 与「跨幕那一帧的新幕次」并不配套 ——
@@ -221,7 +255,7 @@ function play(strategy = 'best', maxSeconds = 60 * 3600) {
     const k = logCapDelta(s, ev.options[0].eff) >= logCapDelta(s, ev.options[1] && ev.options[1].eff) ? 0 : 1;
     resolvePending(s, s.pending[0].uid, k, rates(s));
   }
-  return { s, seconds: t, marks };
+  return { s, seconds: t, marks, caps };
 }
 
 /* ── 一次真跑，多条探针共用（跑一局 ≈1s，跑两次太浪费）── */
@@ -230,23 +264,23 @@ const D = play('idle');
 
 // ═══════════════════════════ §5.1 经济模型六条不变式 ═══════════════════════════
 
-probe('① margin ≥ 0.22（七幕全程）', () => {
-  for (let a = 1; a <= 7; a++) {
+probe('① margin ≥ 0.20（八章全程）', () => {
+  for (let a = 1; a <= 8; a++) {
     const m = marginOf(a);
-    need(m >= 0.22 - 1e-12, `第 ${a} 幕 margin=${m.toFixed(3)} < 0.22`);
-    need(Math.abs(m - (1 - salaryFrac(a) - scaleFrac(a))) < 1e-12, `第 ${a} 幕 margin 与两个 frac 不自洽`);
+    need(m >= 0.20 - 1e-12, `第 ${a} 章 margin=${m.toFixed(3)} < 0.20`);
+    need(Math.abs(m - (1 - salaryFrac(a) - scaleFrac(a))) < 1e-12, `第 ${a} 章 margin 与两个 frac 不自洽`);
   }
-  return '最低 0.220（第 7 幕）';
+  return `最低 ${Math.min(...ACTS.slice(1).map((_, i) => marginOf(i + 1))).toFixed(3)}（第 8 章）`;
 });
 
 probe('② upkeep 无加法项（严格等于 revenue × frac）', () => {
-  for (let a = 1; a <= 7; a++) {
+  for (let a = 1; a <= 8; a++) {
     const s = createState();
     s.stage = a;
-    s.lines = { r: 12, m: 9, h: 15 };
+    s.lines = { ...bal(9), r: 12, h: 15 };
     const R = rates(s);
-    need(R.upkeep === R.revenue * R.frac, `第 ${a} 幕 upkeep ≠ revenue·frac —— 出现了加法项`);
-    need(R.net === R.revenue - R.upkeep, `第 ${a} 幕 net ≠ revenue − upkeep`);
+    need(R.upkeep === R.revenue * R.frac, `第 ${a} 章 upkeep ≠ revenue·frac —— 出现了加法项`);
+    need(R.net === R.revenue - R.upkeep, `第 ${a} 章 net ≠ revenue − upkeep`);
   }
   // 源码级：upkeep 那一行只能是乘法（旧版是 `revenue·k − 固定额`，gross 一小就永久负收入）
   const eco = srcOf('src/core/economy.js');
@@ -254,34 +288,47 @@ probe('② upkeep 无加法项（严格等于 revenue × frac）', () => {
   return '净额恒等于比例式';
 });
 
-probe('③ 三个变量与 GENERATION 恒 ≥ 1', () => {
-  need(GENERATION >= 1, `GENERATION=${GENERATION} < 1`);
+probe('③ 五个变量恒 ≥ 1，且「年营收 / 单次成本」与章节无关', () => {
   need(LINE_GROWTH >= 1, `LINE_GROWTH=${LINE_GROWTH} < 1`);
   for (const lv of [0, 1, 7, 40, 200]) {
     const s = createState();
-    s.lines = { r: lv, m: lv, h: lv };
+    s.lines = bal(lv);
     const R = rates(s);
-    need(R.prod >= 1 && R.share >= 1 && R.team >= 1, `Lv${lv} 出现 <1 的变量`);
+    const all = [R.prod, R.share, R.team, R.comp, R.chan];
+    need(all.every(v => v >= 1), `Lv${lv} 出现 <1 的变量（${all.join('/')}）`);
   }
-  for (let a = 1; a <= 7; a++) need(generationOf(a) >= 1, `第 ${a} 幕 gen < 1`);
-  return '变量与代际恒 ≥1';
+  /**
+   * 删掉旧版 `GENERATION = 1.5^(stage−1)` 隐藏乘数之后才成立的关键事实：
+   * `年营收 / cost(n) = INCOME_SCALE·SEC_PER_YEAR / LINE_COST0` 是**常数**。
+   * 它是「一笔融资值多少次购买全程恒定」与「事件 cash 系数不必逐章缩放」的唯一依据。
+   */
+  const want = INCOME_SCALE * SEC_PER_YEAR / LINE_COST0;
+  for (let a = 1; a <= 8; a++) {
+    const s = createState();
+    s.stage = a;
+    s.lines = bal(30);        // 均衡档：n = ΣL/5
+    const R = rates(s);
+    const ratio = R.revenue / costOf(30);
+    need(Math.abs(ratio / want - 1) < 1e-9, `第 ${a} 章 年营收/cost = ${ratio.toFixed(4)} ≠ ${want.toFixed(4)} —— 又出现了随章缩放的隐藏乘数`);
+  }
+  return `比值恒为 ${want.toFixed(2)}（三线均衡档）`;
 });
 
 probe('④ PE 夹取在 [8, 60] 内', () => {
   need(PE_MIN === 8 && PE_MAX === 60, `PE 区间是 [${PE_MIN}, ${PE_MAX}]`);
-  for (let a = 1; a <= 7; a++) {
+  for (let a = 1; a <= 8; a++) {
     for (const d of [-999, -50, 0, 50, 999]) {
       const s = createState();
       s.stage = a;
       s.mod.pe = d;
       const pe = peOf(s);
-      need(pe >= PE_MIN && pe <= PE_MAX, `第 ${a} 幕 mod.pe=${d} ⇒ PE=${pe} 越界`);
+      need(pe >= PE_MIN && pe <= PE_MAX, `第 ${a} 章 mod.pe=${d} ⇒ PE=${pe} 越界`);
     }
   }
   return `基准 ${ACTS.slice(1).map(a => a.pe).join('/')}`;
 });
 
-probe('⑤ 三条线等级只增不减（源码审计）', () => {
+probe('⑤ 五条线等级只增不减（源码审计）', () => {
   // 允许的写入形态只有两种：购买 +gain（economy）与读档夹取（state）
   const allowed = [
     /s\.lines\[id\] = lineLevel\(s, id\) \+ gain/,     // economy.purchase
@@ -304,19 +351,19 @@ probe('⑤ 三条线等级只增不减（源码审计）', () => {
   return '只有 +gain 与读档夹取两类写入';
 });
 
-probe('⑥ marketCap 对等级单调递增（三线分别验）', () => {
-  for (let a = 1; a <= 7; a++) {
+probe('⑥ marketCap 对等级单调递增（五线分别验）', () => {
+  for (let a = 1; a <= 8; a++) {
     for (const id of LINE_IDS) {
       const s = createState();
       s.stage = a;
-      s.lines = { r: 10, m: 10, h: 10 };
+      s.lines = bal(10);
       const lo = derived(s).marketCap;
       s.lines = { ...s.lines, [id]: 11 };
       const hi = derived(s).marketCap;
-      need(hi > lo, `第 ${a} 幕加 ${id} 一级后市值没涨（${lo} → ${hi}）`);
+      need(hi > lo, `第 ${a} 章加 ${id} 一级后市值没涨（${lo} → ${hi}）`);
     }
   }
-  return '三线各自单调';
+  return '五线各自单调';
 });
 
 // ═══════════════════════════ §1.4 世界市值榜的四条坑 ═══════════════════════════
@@ -339,19 +386,19 @@ probe('未上市不进榜；上市后才出现「我们」', () => {
   const withMe = ranking(w, 1e6, 10, null).all;
   need(withMe.some(c => c.me), '上市（cap>0）后应出现玩家行');
   const s = midState(3, 30);
-  lookTab(s, 1);                                  // 榜单在「市值榜」页
+  lookTab(s, 3);                                  // 榜单在「市值榜」页（第 4 个页签）
   need(!root.innerHTML.includes('class="row me"'), '未上市的主界面里出现了玩家行');
   need(visible(root.innerHTML).includes('未上市'), 'HUD 没写「未上市」');
   s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'];
-  lookTab(s, 1);
+  lookTab(s, 3);
   need(root.innerHTML.includes('class="row me"'), '上市后榜单里没有玩家行');
   return '未上市 — / 上市进榜';
 });
 
-probe('上市且名次 > 20 时钉在列表底部单独一行（100 名开外只报「>100」）', () => {
+probe('上市且名次 > 20 时钉底（>100 只报「>100」、不画升降、市值恒两位小数）', () => {
   const s = midState(3, 30);
   s.finance.rounds = ['ipo'];
-  lookTab(s, 1);
+  lookTab(s, 3);
   const meRowIdx = root.innerHTML.indexOf('class="row me"');
   const sepIdx = root.innerHTML.indexOf('class="sep"');
   need(sepIdx >= 0, '名次 >20 时缺少分隔行 ⋯');
@@ -365,8 +412,16 @@ probe('上市且名次 > 20 时钉在列表底部单独一行（100 名开外只
   need(root.innerHTML.includes('>100</span>'), '榜单钉行没有显示「>100」');
   need(root.innerHTML.includes('<b>>100</b>'), 'HUD 世界格没有显示「>100」');
   need(!root.innerHTML.includes('class="lines"'),
-    '「市值榜」页里冒出了投资线 —— 两页内容必须互斥');
-  return `名次 #${s.worldRank} ⇒ 钉底并报 >100`;
+    '「市值榜」页里冒出了投资线 —— 页与页的内容必须互斥');
+  // 100 名开外**连升降也不画**：那个区间里名次每天都在漂，↑3 / ↓5 只是噪声
+  const dlt = /class="row me"[\s\S]*?<span class="dlt">([\s\S]*?)<\/span>/.exec(root.innerHTML);
+  need(dlt && dlt[1] === '', `玩家在 >100 名时仍显示升降（实得 ${JSON.stringify(dlt && dlt[1])}）`);
+
+  // 市值一律两位小数（「三位数就取整」已废弃）：造一家 $123.456T 的公司看渲染
+  s.world.companies.forEach((c, i) => { c.cur = c.prev = i === 0 ? 123.456 : 1; });
+  lookTab(s, 3);
+  need(root.innerHTML.includes('>123.46<'), '三位数市值没有保留两位小数');
+  return `名次 #${s.worldRank} ⇒ 钉底 + 报 >100 + 不画升降 ／ $123.456T ⇒ 123.46`;
 });
 
 probe('rankDelta：新入场为 null，且上月名次按全榜重排', () => {
@@ -432,17 +487,17 @@ probe('default 一律是保守项（保住现金、不换乘数）', () => {
   return `${EVENTS.length} 条全部以保守项收尾`;
 });
 
-probe('每幕事件池恒为 6 条（3 通用 + 3 专属）', () => {
+probe('每章事件池恒为 16 条（8 通用 + 8 专属）', () => {
   const generic = EVENTS.filter(e => e.stage === 0).length;
-  need(generic === 3, `通用事件 ${generic} 条`);
-  for (let a = 1; a <= 7; a++) {
+  need(generic === 8, `通用事件 ${generic} 条`);
+  for (let a = 1; a <= 8; a++) {
     const pool = eventsFor(a);
     const own = pool.filter(e => e.stage === a).length;
-    need(pool.length === 6, `第 ${a} 幕池子 ${pool.length} 条`);
-    need(own === 3, `第 ${a} 幕专属 ${own} 条`);
-    need(pool.every(e => eventById(e.id) === e), `第 ${a} 幕有 id 对不上的事件`);
+    need(pool.length === 16, `第 ${a} 章池子 ${pool.length} 条`);
+    need(own === 8, `第 ${a} 章专属 ${own} 条`);
+    need(pool.every(e => eventById(e.id) === e), `第 ${a} 章有 id 对不上的事件`);
   }
-  return '7 幕 × 6 条';
+  return `${ACTS.length - 1} 章 × 16 条`;
 });
 
 probe('选项效果只落在五个变量上', () => {
@@ -458,7 +513,7 @@ probe('选项效果只落在五个变量上', () => {
 probe('在线不弹窗：待决长在主界面，overlay 保持干净', () => {
   const s = midState(2, 20);
   need(s.pending.length > 0, '中期存档居然没有待决事件');
-  lookTab(s, 0);
+  lookTab(s, TAB_COMPANY);                        // 待决卡片长在「公司」页
   need(root.innerHTML.includes('class="pending"'), '主界面没有待决区');
   const opts = buttonsIn(root.innerHTML).filter(b => b.data.opt !== undefined);
   need(opts.length === 2, `主界面待决选项 ${opts.length} 个`);
@@ -521,179 +576,181 @@ probe('自动购买：现金够就买「等级最低」那条线，均衡自动�
   s.money = 0;
   tick(s, 0);
   need(lineLevel(s, 'r') === 0 && s.money === 0, '没钱也买了');
-  // 给一笔够买几十次的钱，跑一小步（dt 足够短，只触发自动购买）
-  s.money = costOf(0) * 20;
+  // 给一笔够买十几次的钱，跑一小步（dt 足够短，只触发自动购买）
+  // ⚠️ 闸门是「可动用现金 = 现金 × (1 − RESERVE_FRAC)」，所以放的是**现金**：
+  //    要 20 份可动用就得放 `20 / (1 − RESERVE_FRAC)` 份 —— rf=0.80 下是 100 份成本。
+  //    （旧版是「年营收 × 0.25」的储备金，与 `LINE_COST0` 无关，只按 costOf(0) 给钱
+  //      会在 `LINE_COST0` 调小时突然翻红；现金基数没有这个耦合。）
+  s.money = costOf(0) * 20 / (1 - RESERVE_FRAC);
   tick(s, 0.001);
   const lv = LINE_IDS.map(id => lineLevel(s, id));
-  need(Math.max(...lv) - Math.min(...lv) <= 1, `自动购买后三线不再均衡：${lv.join('/')}`);
+  need(Math.max(...lv) - Math.min(...lv) <= 1, `自动购买后五线不再均衡：${lv.join('/')}`);
   need(Math.min(...lv) >= 2, `只买了 ${lv.join('/')}，一次 tick 的购买次数太少`);
   return `${lv.join('/')}（极差 ≤1）`;
 });
 
-probe('手动 = 满配、自动 = 打折版（同价不同级，且自动要留储备）', () => {
+probe('手动 = 满配、自动 = 打折版（同一条闸门，手动付 MANUAL_PAY 份钱换 MANUAL_GAIN 级）', () => {
   const s = midState(2, 20);
   s.money = 0;
   const want = lowestLine(s);
   const cost = costFor(s, want);
-  // 「买的正是最便宜那条」= 三线共用 cost(n) 的直接推论
+  // 「买的正是最便宜那条」= 五线共用 cost(n) 的直接推论
   const costs = LINE_IDS.map(id => costFor(s, id));
-  need(cost === Math.min(...costs), '最低等级那条不是最便宜的 —— 三线 cost 不再共用');
+  need(cost === Math.min(...costs), '最低等级那条不是最便宜的 —— 五线 cost 不再共用');
 
-  // ① 手动：付一级的钱、涨 MANUAL_GAIN 级（价格与自动完全一样，差别只在级数）
-  s.money = cost;
+  // ① 手动：付 `MANUAL_PAY` 份原价、涨 `MANUAL_GAIN` 级（界面印的价必须与真扣款同源）
+  // ⚠️ 账上要放够「**可动用**那笔钱」：可动用 = 现金 × (1 − RESERVE_FRAC)，
+  //    所以现金得是 `pay / (1 − F)`（储备是现金的函数，不是外加的一笔）。
+  const pay = manualCostOf(s, want);
+  need(Math.abs(pay - cost * MANUAL_PAY) < 1e-9, 'manualCostOf 与 cost × MANUAL_PAY 不一致');
+  const money0 = pay / (1 - RESERVE_FRAC);
+  s.money = money0;
+  need(canAffordManual(s, want) === true, '钱刚够，按钮却是灭的');
   const lvManual = lineLevel(s, want);
   need(manualBuy(s, want) === true, '手动购买失败');
   need(lineLevel(s, want) === lvManual + MANUAL_GAIN, `手动只涨了 ${lineLevel(s, want) - lvManual} 级`);
-  need(s.money === 0, '手动扣款不是一级的钱');
+  need(Math.abs(s.money - (money0 - pay)) < 1e-9, '手动扣款不是 MANUAL_PAY 份的钱');
+  need(MANUAL_GAIN / MANUAL_PAY < 2, `手动钱效率 ${(MANUAL_GAIN / MANUAL_PAY).toFixed(2)} 级/份 —— 快过 3h 的根源`);
 
-  // ② 自动：同一个价格，一次一级
+  // ② 自动：一级的原价，一次一级
   const id2 = lowestLine(s);
   const cost2 = costFor(s, id2);
-  s.money = cost2;
+  const money1 = cost2 / (1 - RESERVE_FRAC);
+  s.money = money1;
   const lvAuto = lineLevel(s, id2);
   need(purchase(s, id2) === true, '自动购买失败');
   need(lineLevel(s, id2) === lvAuto + 1, '自动不是一次一级');
-  need(s.money === 0, '自动扣款不对');
+  need(Math.abs(s.money - (money1 - cost2)) < 1e-9, '自动扣款不对');
   need(MANUAL_GAIN > 1, `MANUAL_GAIN = ${MANUAL_GAIN} —— 手动没有分量`);
+  need(MANUAL_PAY < MANUAL_GAIN, `MANUAL_PAY = ${MANUAL_PAY} —— 手动比原价买两级还贵，等于没有分量`);
+  need(MANUAL_PAY > 1, `MANUAL_PAY = ${MANUAL_PAY} —— 退化成「买一送一」，一局只要 1.49h`);
 
-  // ③ 让路：自动的动手门槛是 AUTO_BUY_RESERVE 份钱 —— 没有它，手动永远点不动
+  // ③ 让路：自动的动手门槛是「K 份钱」—— 没有它，手动永远点不动。
+  //    ⚠️ 门槛是**两档**的（用户 2026-09-27「融资前只能玩家自己点击」）：融资前
+  //       `AUTO_BUY_RESERVE_EARLY`、天使轮到账后 `AUTO_BUY_RESERVE`。断言必须走
+  //       **同一个选择器**，否则量的是另一套规则。
   need(AUTO_BUY_RESERVE >= 2, `AUTO_BUY_RESERVE = ${AUTO_BUY_RESERVE} —— 没有给手动留窗口`);
+  need(AUTO_BUY_RESERVE_EARLY > AUTO_BUY_RESERVE,
+    `融资前 ${AUTO_BUY_RESERVE_EARLY} ≤ 融资后 ${AUTO_BUY_RESERVE} —— 「融资前玩家自己点」这句感觉不到`);
   const s2 = createState();
   s2.stage = 2; s2.money = 0;
+  // `createState()` 的 `finance.rounds` 是空的 ⇒ 走的正是「融资前」那一档
+  const kEarly = autoBuyReserveOf(s2);
+  need(kEarly === AUTO_BUY_RESERVE_EARLY, '没融资却拿到了「融资后」的门槛');
   const idm = lowestLine(s2);
   const c0 = costFor(s2, idm);
-  // 只放「一份钱」：自动不动手 ⇒ 这一份钱留给了玩家
-  s2.money = c0 * (AUTO_BUY_RESERVE - 0.5);
+  // 只放「`kEarly − 0.5` 份**可动用**的钱」：不够自动动手 ⇒ 这一段窗口留给了玩家
+  const moneyEarly = c0 * (kEarly - 0.5) / (1 - RESERVE_FRAC);
+  s2.money = moneyEarly;
   tick(s2, 0);
-  need(s2.money >= c0, `自动把 ${AUTO_BUY_RESERVE - 0.5} 份钱花掉了 —— 手动窗口不存在`);
-  return `手动 +${MANUAL_GAIN} 级 / 自动 +1 级，储备 ${AUTO_BUY_RESERVE} 份`;
+  need(s2.money >= moneyEarly - 1e-9, `自动把 ${kEarly - 0.5} 份钱花掉了 —— 手动窗口不存在`);
+  // 天使轮到账 ⇒ 门槛回到自动化那一档（这里正是「融资前 / 融资后」的分界）
+  const s3 = createState();
+  s3.finance.rounds.push('angel');
+  need(autoBuyReserveOf(s3) === AUTO_BUY_RESERVE, '融资到账后门槛没有回到融资后那一档');
+  return `手动 +${MANUAL_GAIN} 级 / 自动 +1 级，让路储备 融资前 ${kEarly} 份 · 融资后 ${AUTO_BUY_RESERVE} 份`;
 });
 
 probe('唯一结局「登顶」：worldRank === 1 且无第二条结局', () => {
   need(Object.keys(ENDING_TEXT).length === 1 && ENDING_TEXT.top, `结局文案有 ${Object.keys(ENDING_TEXT).length} 条`);
-  const s = createState();
-  s.worldRank = null;
-  need(evaluateRetirement(s).ending === null, 'worldRank 为空时不该给结局');
-  s.worldRank = 5;
-  const r = evaluateRetirement(s);
-  need(r.ending === null && r.rank === 5, '未登顶却结算了结局');
-  s.worldRank = 1;
-  need(evaluateRetirement(s).ending === 'top', 'worldRank===1 没判成登顶');
+  /**
+   * 判据只有一个来源：`s.worldRank`。`engine.tick` 用它**自动**触发结局；
+   * 「退休」横条走 `evaluateRetirement()` 读同一个字段 —— 两处不会打架，也不会出现
+   * 「按钮说第一、世界榜说第二」。这里把那个函数的三条边界钉死。
+   */
+  need(evaluateRetirement({ worldRank: 1 }).ending === 'top', 'evaluateRetirement 对第 1 名没给出结局');
+  need(evaluateRetirement({ worldRank: 2 }).ending === null, 'evaluateRetirement 对第 2 名也给了结局');
+  need(evaluateRetirement({}).rank === null, 'worldRank 还没算出来时 rank 不是 null');
   need(A.s.ending === 'top', `真跑一局没有走到结局（ending=${A.s.ending ?? 'null'}）`);
   need(A.s.worldRank === 1, `结局时 worldRank=${A.s.worldRank}`);
-  return '唯一结局可复现';
+  return '唯一结局可复现 · 退休入口只读 worldRank';
 });
 
-probe('阶段推进：唯一机械闸门是「市值 ≥ 本幕 mcap」', () => {
-  for (let a = 1; a <= 6; a++) {
-    need(ACTS[a + 1].mcap > ACTS[a].mcap, `第 ${a} 幕门槛没有严格递增`);
+probe('阶段推进：唯一机械闸门是「市值 ≥ 本章 mcap」', () => {
+  for (let a = 1; a <= 7; a++) {
+    need(ACTS[a + 1].mcap > ACTS[a].mcap, `第 ${a} 章门槛没有严格递增`);
   }
-  need(ACTS[1].mcap > START_MCAP, '第 1 幕门槛低于开局市值 —— 一开局就会推进');
-  need(IPO_LINE === ACTS[4].mcap, `IPO_LINE=${IPO_LINE} 与 ACTS[4].mcap=${ACTS[4].mcap} 不一致`);
+  need(ACTS[1].mcap > START_MCAP, '第 1 章门槛低于开局市值 —— 一开局就会推进');
+  need(IPO_LINE > ACTS[6].mcap && IPO_LINE < ACTS[7].mcap,
+    `IPO_LINE=${IPO_LINE.toExponential(2)} 不在第 7 章区间 (${ACTS[6].mcap.toExponential(2)}, ${ACTS[7].mcap.toExponential(2)}) 内`);
   const s = midState(1, 0);
-  need(s.stage === 1, '开局幕次不是 1');
+  need(s.stage === 1, '开局章次不是 1');
   need(!stageGoalMet(s, rates(s), derived(s)) || true, '目标判定不该抛错');
-  return `1.07e5 → 1.76e15（7 档）`;
+  return `${START_MCAP.toExponential(2)} → ${ACTS[8].mcap.toExponential(2)}（8 档）`;
 });
 
-probe('上市时点：第 4 幕幕末敲钟（融资幕的四轮都排在第 4 幕里）', () => {
-  need(IPO_LINE === ACTS[4].mcap, `IPO_LINE=${IPO_LINE} ≠ ACTS[4].mcap=${ACTS[4].mcap}`);
-  // 四轮融资必须都落在第 4 幕的年份区间内，否则会出现「先上市、后到账」
-  const [y0, y1] = /(\d{4})–(\d{4})/.exec(ACTS[4].years).slice(1).map(Number);
-  const want = { a: 4, b: 4, c: 4, preIpo: 4, angel: 2, preA: 2 };
+probe('上市时点：第 7 章中段敲钟（不再与 A 轮挤在同一幕）', () => {
+  // 七轮的年份必须落在**各自那一章**的区间里，否则会出现「先上市、后到账」
+  const wantChapter = { angel: 2, preA: 2, a: 4, b: 4, c: 5, preIpo: 6 };
   for (const r of ROUNDS) {
     if (r.id === 'ipo') { need(r.year === null, 'IPO 不该看年份（它看市值）'); continue; }
-    const [a0, a1] = /(\d{4})–(\d{4})/.exec(ACTS[want[r.id]].years).slice(1).map(Number);
-    need(r.year >= a0 && r.year <= a1, `${r.name}（${r.year}）不在第 ${want[r.id]} 幕区间 ${a0}–${a1} 内`);
+    const ch = wantChapter[r.id];
+    const [a0, a1] = /(\d{4})–(\d{4})/.exec(ACTS[ch].years).slice(1).map(Number);
+    need(r.year >= a0 && r.year <= a1, `${r.name}（${r.year}）不在第 ${ch} 章区间 ${a0}–${a1} 内`);
   }
-  // 端到端：市值越过 IPO_LINE 的那一 tick 必须同时「敲钟 + 进第 5 幕」
+  // 「A 轮」与「IPO」必须**不在同一章** —— 这正是八章拆分要解决的那件事
+  need(wantChapter.a !== 7, 'A 轮与 IPO 又挤回同一章了');
+  // 端到端：市值越过 IPO_LINE 那一 tick 必须敲钟，且**仍停在第 7 章**（后面还有半章 + 第 8 章）
+  // ⚠️ 等级不能硬编码（`IPO_LINE` 会随标定移动）—— 搜出「刚够上线」的那个 L。
   const s = createState();
-  s.stage = 4;
-  s.lines = { r: 60, m: 60, h: 60 };
+  s.stage = 7;
+  let L = 0;
+  while (L < 400 && derived(s).marketCap < IPO_LINE) { L += 1; s.lines = bal(L); }
   tick(s, 0);
-  need(isListed(s), `市值 ¥${(derived(s).marketCap).toFixed(0)} 越过上线却没敲钟`);
-  need(s.stage === 5, `敲钟时应刚好进第 5 幕（实得第 ${s.stage} 幕）`);
+  need(isListed(s), `市值 ¥${(derived(s).marketCap).toExponential(3)} 越过上线却没敲钟`);
+  need(s.stage === 7, `敲钟应发生在第 7 章之内（实得第 ${s.stage} 章）`);
   need(s.log.some(t => t.includes(companyName(true))), '敲钟没有改名日志');
-  return `第 4 幕区间 ${y0}–${y1} · 幕末敲钟`;
+  return `IPO 落在第 7 章：${IPO_LINE.toExponential(2)} ∈ (${ACTS[6].mcap.toExponential(2)}, ${ACTS[7].mcap.toExponential(2)})`;
 });
 
-probe('阶段目标：七条都在**本幕之内**被打勾（不是一进幕就成立的假目标）', () => {
+probe('阶段目标：前七条都在**本章之内**被打勾，第八条 = 结局', () => {
   const { s, marks } = A;
   const out = [];
-  for (let a = 1; a <= 6; a++) {
+  for (let a = 1; a <= 7; a++) {
     const m = marks[a];
-    need(m, `第 ${a} 幕整幕没被观察到`);
-    need(m.hit !== undefined, `第 ${a} 幕目标「${ACTS[a].goal}」整幕都没打勾 —— 这是句假话`);
-    need(m.hit > m.first, `第 ${a} 幕目标「${ACTS[a].goal}」一进幕就已经成立（${m.first}s 就为真）`);
+    need(m, `第 ${a} 章整章没被观察到`);
+    need(m.hit !== undefined, `第 ${a} 章目标「${ACTS[a].goal}」整章都没打勾 —— 这是句假话`);
+    need(m.hit > m.first, `第 ${a} 章目标「${ACTS[a].goal}」一进章就已经成立（${m.first}s 就为真）`);
     out.push(`${(100 * (m.hit - m.first) / Math.max(1, m.last - m.first)).toFixed(0)}%`);
   }
-  const m7 = marks[7];
-  need(m7 && m7.hit !== undefined, '第 7 幕目标（登顶）整幕没打勾');
+  const m8 = marks[8];
+  need(m8 && m8.hit !== undefined, '第 8 章目标（登顶）整章没打勾');
   need(s.ending === 'top', `真跑一局没走到结局（ending=${s.ending ?? 'null'}）`);
-  return `幕内跨过位置 ${out.join(' / ')} · 第 7 幕 = 结局`;
+  return `章内跨过位置 ${out.join(' / ')} · 第 8 章 = 结局`;
 });
 
-probe('市场份额：以本幕市场（mcap/PE）为分母，恒 ≤50%、随营收单调、换幕回落', () => {
-  for (let a = 1; a <= 7; a++) {
-    const m = marketRevenueOf(a);
-    need(m > 0, `第 ${a} 幕市场年营收非正`);
-    let prev = -1;
-    for (const f of [0, 0.25, 0.5, 0.75, 1]) {
-      const p = sharePctOf(m * f, a);
-      need(p >= 0 && p <= 50 + 1e-9, `第 ${a} 幕份额越界：${p}%`);
-      need(p > prev, `第 ${a} 幕份额没有随营收单调上升`);
-      prev = p;
-    }
-    need(Math.abs(sharePctOf(m, a) - 50) < 1e-9, `第 ${a} 幕幕末份额不是 50%`);
-    // 换幕回落：上一幕幕末的营收，放到下一幕的分母里就不到一半了
-    if (a < 7) need(sharePctOf(m, a + 1) <= 50, `第 ${a + 1} 幕起点份额没有回落`);
+probe('赛道份额：以外生行业盘子 TAM(year) 为分母，从 0% 单调升到约 60%', () => {
+  need(TAM_GROWTH > 1, `TAM_GROWTH=${TAM_GROWTH} ≤ 1`);
+  // 开局：用户 2026-09-26 报过「一开始怎么可能份额有 40%」—— 必须就是「还没有份额」
+  const open = sharePctOf(START_MCAP / PE_BASE[1], startYearOf(1));
+  need(open < 1, `开局份额就有 ${open.toFixed(2)}% —— 又回到「一开始就有份额」的老毛病`);
+  let prev = -1;
+  for (let a = 1; a <= 8; a++) {
+    const p = sharePctOf(ACTS[a].mcap / PE_BASE[a], startYearOf(a));
+    need(p >= 0, `第 ${a} 章起份额为负：${p}`);
+    need(p > prev, `第 ${a} 章起份额没有比上一章高（${p.toFixed(3)}% ≤ ${prev.toFixed(3)}%）`);
+    prev = p;
   }
-  // 旧口径的病根：份额饱和到 99%。第 2–7 幕一开场都该离上限很远……
-  for (let a = 2; a <= 7; a++) {
-    const p = sharePctOf(ACTS[a - 1].mcap / PE_BASE[a], a);
-    need(p < 20, `第 ${a} 幕一开场份额就有 ${p.toFixed(0)}% —— 又饱和了`);
-  }
-  // ……第 1 幕是例外：开局市值 ÷ 第 1 幕门槛只有 1.48×，起点必然偏高；但也不许顶到上限
-  need(sharePctOf(START_MCAP / PE_BASE[1], 1) < 50, '第 1 幕一开场就顶到上限');
-  return '幕末恒 50% · 第 2–7 幕幕起 <20%';
+  // 终局（第 8 章末、2066 年）：用户 2026-09-27 要的「结局在 50% 左右」⇒ 55%–65%
+  const endYear = Number(/(\d{4})\s*$/.exec(ACTS[8].years)[1]);
+  const end = sharePctOf(ACTS[8].mcap / PE_BASE[8], endYear);
+  need(end >= 55 && end <= 65, `终局份额 ${end.toFixed(1)}% —— 应在 55%–65%（赛道口径）`);
+  return `开局 ${open.toFixed(3)}% → 终局 ${end.toFixed(1)}%（全程单调）`;
 });
 
-probe('投资线的份额渲染：七幕全程都不越过 50%（修掉「饱和到 99%」）', () => {
+probe('投资线的份额渲染：八章全程都不越过 60%（修掉「饱和到 99%」）', () => {
   const out = [];
-  for (let a = 1; a <= 7; a++) {
+  for (let a = 1; a <= 8; a++) {
     const s = midState(a, a * 4);
-    lookTab(s, 0);
-    const m = /市场份额 ([\d.]+)%/.exec(visible(root.innerHTML));
-    need(m, `第 ${a} 幕投资线没显示份额百分比`);
+    lookTab(s, TAB_FOUNDER);                    // 「份额」那一行在「创始人」页（投营销）
+    const m = /赛道份额 ([\d.]+)%/.exec(visible(root.innerHTML));
+    need(m, `第 ${a} 章投资线没显示份额百分比`);
     const p = Number(m[1]);
-    need(p <= 50 + 1e-9, `第 ${a} 幕份额 ${p}% 超过 50% 上限`);
+    need(p >= 0 && p <= 60 + 1e-9, `第 ${a} 章份额 ${p}% 越界`);
     out.push(p.toFixed(0));
   }
   setTab(0);
-  return `1–7 幕：${out.join('% / ')}%`;
-});
-
-probe('自动购买方向：优先所选那条，但领先超过 FOCUS_LAG 级就自动回补', () => {
-  need(FOCUS.length === LINE_IDS.length + 1, `方向选项 ${FOCUS.length} 个（应为 均衡 + 三条线）`);
-  const s = createState();
-  s.stage = 2;
-  s.money = 1e12;                       // 钱管够，一 tick 内连买
-  need(setFocus(s, 'r'), 'setFocus 拒绝了合法方向');
-  need(!setFocus(s, 'nope'), 'setFocus 接受了非法方向');
-  need(s.focus === 'r', 'setFocus 没有落进状态');
-  tick(s, 0);
-  const lv = LINE_IDS.map(id => lineLevel(s, id));
-  const d = lv[LINE_IDS.indexOf('r')] - Math.min(...lv);
-  need(d > 0, `选了「投研发」，研发却不是买得最多的：${lv.join('/')}`);
-  need(d <= FOCUS_LAG, `研发领先最低线 ${d} 级 —— 超过 FOCUS_LAG=${FOCUS_LAG}，回补没生效`);
-
-  const s2 = createState();
-  s2.stage = 2; s2.money = 1e12;
-  need(s2.focus === FOCUS_EVEN, `新档默认方向不是均衡（实得 ${s2.focus}）`);
-  tick(s2, 0);
-  const lv2 = LINE_IDS.map(id => lineLevel(s2, id));
-  need(Math.max(...lv2) - Math.min(...lv2) <= 1, `均衡档下三线失衡：${lv2.join('/')}`);
-  return `r 领先 ${d} 级（上限 ${FOCUS_LAG}）／均衡档极差 ${Math.max(...lv2) - Math.min(...lv2)}`;
+  return `1–8 章：${out.join('% / ')}%`;
 });
 
 probe('事件增强：选项按钮带效果数字；第 AUTO_DECIDE_STAGE 幕起不再打扰玩家', () => {
@@ -701,10 +758,10 @@ probe('事件增强：选项按钮带效果数字；第 AUTO_DECIDE_STAGE 幕起
   const s = midState(3, 30);
   s.pending.length = 0;
   s.pending.push({ uid: 1, id: 'e31' });
-  lookTab(s, 0);
+  lookTab(s, TAB_COMPANY);
   const html = root.innerHTML;
   need(/<em class="eff">/.test(html), '事件选项上没有效果数字');
-  need(visible(html).includes('现金 +0.9% 年营收'), `选项没写出现金代价：${visible(html).slice(0, 120)}`);
+  need(visible(html).includes('现金 +3.0% 年营收'), `选项没写出现金代价：${visible(html).slice(0, 120)}`);
   need(visible(html).includes('产品力 ×1.015'), '选项没有写出乘数代价');
 
   // ② 自动化：后期幕的年度事件直接按保守项结算，不进待决队列（前期仍交给玩家）
@@ -737,7 +794,7 @@ probe('进度钟：日历与年份都由市值派生（玩得快走得快）', (
   const slow = createState();
   tick(slow, 0);
   const fast = createState();
-  fast.lines = { r: 60, m: 60, h: 60 };
+  fast.lines = bal(60);
   tick(fast, 0);
   need(gameMonths(slow) === 0, `开局应停在第 0 月，实得 ${gameMonths(slow)}`);
   need(gameMonths(fast) > 0, '市值更高却没有推进日历');
@@ -750,9 +807,9 @@ probe('进度钟：日历与年份都由市值派生（玩得快走得快）', (
 probe('进度钟单调不倒退（跨幕边界也不回跳）', () => {
   const months = [];
   const s = createState();
-  s.lines = { r: 0, m: 0, h: 0 };
+  s.lines = bal(0);
   for (let lv = 0; lv <= 200; lv += 2) {
-    s.lines = { r: lv, m: lv, h: lv };
+    s.lines = bal(lv);
     months.push(calMonthOf(s, derived(s)));
   }
   for (let i = 1; i < months.length; i++) {
@@ -762,21 +819,118 @@ probe('进度钟单调不倒退（跨幕边界也不回跳）', () => {
   return `${months.length} 个采样点全程单调`;
 });
 
-probe('ACT_MONTHS 与 ACTS[].years 一致，且首尾相接铺满 420 月', () => {
-  for (let a = 1; a <= 7; a++) {
+probe('ACT_MONTHS 与 ACTS[].years 一致，且首尾相接铺满 480 月', () => {
+  // 八章的年份跨度**不相等**（4/4/5/5/5/5/6/6 年）—— 所以这里只守「首尾相接 + 总长」，
+  // 不守旧版那条「每章整 60 月」（它在八章下是假的）。
+  need(ACT_MONTHS[1][0] === 0, `首章起点应为第 0 月（实得 ${ACT_MONTHS[1][0]}）`);
+  for (let a = 1; a <= 8; a++) {
     const [m0, m1] = ACT_MONTHS[a];
-    need(m1 - m0 === 60, `第 ${a} 幕跨度 ${m1 - m0} 月（应为 60）`);
-    if (a > 1) need(ACT_MONTHS[a][0] === ACT_MONTHS[a - 1][1], `第 ${a} 幕与前一幕不相接`);
+    need(m1 - m0 >= 48 && m1 - m0 <= 72, `第 ${a} 章跨度 ${m1 - m0} 月（应在 48–72 之间）`);
+    if (a > 1) need(ACT_MONTHS[a][0] === ACT_MONTHS[a - 1][1], `第 ${a} 章与前一章不相接`);
   }
-  need(ACT_MONTHS[7][1] === MONTHS_TOTAL, `末值 ${ACT_MONTHS[7][1]} ≠ ${MONTHS_TOTAL}`);
-  need(TOTAL_YEARS === 35, `TOTAL_YEARS=${TOTAL_YEARS}`);
+  need(ACT_MONTHS[8][1] === MONTHS_TOTAL, `末值 ${ACT_MONTHS[8][1]} ≠ ${MONTHS_TOTAL}`);
+  need(MONTHS_TOTAL === 480, `MONTHS_TOTAL=${MONTHS_TOTAL}（40 周年 = 480 月）`);
+  need(TOTAL_YEARS === 40, `TOTAL_YEARS=${TOTAL_YEARS}`);
   need(NARRATIVE_YEARS === TOTAL_YEARS, '曲线目标里的叙事跨度与 format 不一致');
-  return '2026–2061 逐幕相接';
+  return `2026–2066 逐章相接（末月 ${MONTHS_TOTAL}）`;
+});
+
+// ═══════════════════════════ §1.4 宏观周期（一局 4 段低谷）═══════════════════════════
+
+/**
+ * 这两条探针是「低调谷能不能被看见」的可断言形态（用户 2026-09-27）。
+ *
+ * ⚠️ 曾经的写法（`valAt = 1 + A·sin`）**永远红**，原因写在 content.js 的周期注释里：
+ *    阶梯规定了月增速最低 +2.55%（第 1 章），而正弦的月跌幅上限只有 1.35% ⇒ 环比永不为负。
+ *    现在形状换成锯齿（同一 ±25% 的带，压缩到 3 个月里释放），低谷才真的出现。
+ */
+probe('低谷可见：一局正好 4 段 ≥5% 的低谷', () => {
+  const pts = A.caps;
+  need(pts.length > 1000, `只采到 ${pts.length} 个 tick（一局没走完）`);
+  /**
+   * 低谷 = 「从上一处高点跌掉 `DIP_MIN` 以上、再创新高才算收口」的那一段。
+   *
+   * 为什么要**收口**而不是数「环比为负」：市值是 `阶梯 × valAt`，两者的月增速都只有百分之几，
+   * 一个 tick 里的浮点抖动也算「环比为负」；而真实低谷的深度是 7% 量级。
+   * 用 2% 的起步门槛把抖动滤掉（断言仍按 5%）⇒ 段数才是「玩家看得见的低谷」的条数。
+   * ⚠️ 门槛不能取到 5% 以上：那就与下面的 `worst >= 0.05` 同义，断言变成自证。
+   */
+  const DIP_MIN = 0.02;
+  const dips = [];
+  let peak = null;
+  let dip = null;
+  for (const p of pts) {
+    if (!peak || p.v >= peak.v) { if (dip) { dips.push(dip); dip = null; } peak = p; continue; }
+    if (dip) { dip.to = p.m; if (p.v < dip.low.v) dip.low = p; continue; }
+    if (1 - p.v / peak.v >= DIP_MIN) dip = { from: p.m, to: p.m, peak, low: p };
+  }
+  if (dip) dips.push(dip);
+  const depth = g => 1 - g.low.v / g.peak.v;
+  const show = g => `第 ${g.peak.m}→${g.low.m} 月 −${(depth(g) * 100).toFixed(1)}%`
+    + `（rev ${(g.peak.rev / 1e8).toFixed(0)}→${(g.low.rev / 1e8).toFixed(0)}亿 ·`
+    + ` val ${g.peak.va.toFixed(3)}→${g.low.va.toFixed(3)} · pe ${g.peak.pe}→${g.low.pe}）`;
+  /**
+   * ⚠️ 数的是 **≥5%** 的段，不是全部候选段：成本寒冬最深的那个月恰好压在缓跌段上时，
+   *    自动购买会停摆几个月（`cost` 涨得比现金快）⇒ rev 持平而 `valAt` 仍在跌，
+   *    于是多出一段 **2–3% 的浅坑**（实测第 341→346 月 −2.7%）。它是真实的、也是想要的
+   *    （寒冬就该咬人），只是不是设计意义上的「一段低谷」——「一段低谷」的判据是 ≥5%。
+   */
+  const visible = dips.filter(g => depth(g) >= 0.05);
+  need(visible.length === 4,
+    `≥5% 的低谷 ${visible.length} 段（一局应为 4 段）—— 周期长度或市值阶梯动过。全部候选段：\n      `
+    + dips.map(show).join('\n      '));
+  return visible.map(show).join(' ｜ ')
+    + (dips.length > visible.length ? `（另 ${dips.length - visible.length} 段浅坑 <5%）` : '');
+});
+
+probe('周期两端锚点不被污染：valAt(0)=valAt(480)=1、winterAt(0)=winterAt(480)=1、均值 0', () => {
+  // 终局锚点：`ACTS[8].mcap` 是 `tune` 钉在「第 480 月世界榜首」上的，那一点两个乘数必须是 1
+  need(Math.abs(valAt(0) - 1) < 1e-12 && Math.abs(valAt(MONTHS_TOTAL) - 1) < 1e-12,
+    `valAt 端点不是 1（${valAt(0)} / ${valAt(MONTHS_TOTAL)}）—— 整条市值阶梯都要乘系数`);
+  // 起点锚点：`costOf(n)` 的默认月是 0，探针与工具里那些老调用点全靠冬天乘数为 1
+  need(Math.abs(winterAt(0) - 1) < 1e-12 && Math.abs(winterAt(MONTHS_TOTAL) - 1) < 1e-12,
+    `winterAt 端点不是 1（${winterAt(0)} / ${winterAt(MONTHS_TOTAL)}）—— costOf(n) 的默认月不再等于基准价`);
+  // 值域与均值：带是 ±25% ／ ∓30%，全程均值为 1（因为 480 恰好是 4 个整周期）
+  // ⚠️ 取**整数月**：锯齿的顶点在 `u = CYCLE_RISE = 57`、谷底在 `u = 117`，都是整数月；
+  //    取半月会永远差一点（量到 0.9912 而不是 1）。整数采样同时让均值精确为 0（两段三角配平）。
+  let sum = 0, lo = Infinity, hi = -Infinity;
+  for (let m = 0; m < MONTHS_TOTAL; m++) {
+    const w = cycleAt(m);
+    sum += w; lo = Math.min(lo, w); hi = Math.max(hi, w);
+  }
+  need(Math.abs(sum / MONTHS_TOTAL) < 1e-9, `cycleAt 全程均值 ${sum / MONTHS_TOTAL}（应为 0 —— 否则全程总产出被周期整体抬高或压低）`);
+  need(Math.abs(lo + 1) < 1e-12 && Math.abs(hi - 1) < 1e-12, `cycleAt 值域 [${lo}, ${hi}]（应为 [−1, +1]）`);
+  need(MONTHS_TOTAL / CYCLE_MONTHS === 4, `${MONTHS_TOTAL} ÷ ${CYCLE_MONTHS} ≠ 4 —— 一局不再正好 4 段`);
+  need(Math.max(VAL_CYCLE_AMP, COST_CYCLE_AMP) <= 0.35,
+    `幅度 ${VAL_CYCLE_AMP}/${COST_CYCLE_AMP} 超出「温和」档 —— 一局会被周期推出 [3,6]h`);
+  return `估值 ±${VAL_CYCLE_AMP * 100}% ／ 成本 ∓${COST_CYCLE_AMP * 100}% ｜ 一局 ${MONTHS_TOTAL / CYCLE_MONTHS} 个整周期`;
+});
+
+/**
+ * 用户 2026-09-27 报的「年营收 3.30 万亿、现金储备只有几百亿」= 这条恒等式取旧值 rf=0.25 的结果。
+ * ```
+ * 现金 / 年营收 ∈ [ K/(1−rf) − 1 , K/(1−rf) ] / (年营收/cost)
+ * ```
+ * `K = autoBuyReserveOf`（融资后 2），`年营收/cost = 41.02`（`LINE_COST0 = 8777`）⇒ rf=0.25 给 **4.1%–6.5%**
+ * （比现实里最低的 SS&C 7.4% 还低），rf=0.80 给 **21.9%–24.4%**（Micron 25.7% 与 Microsoft 33.6% 之间）。
+ *
+ * ⚠️ 口径要**先除掉 `winterAt(月)`**：锯齿上沿是 `K × cost(月)`，而 `cost` 里带着成本寒冬 ⇒
+ *    终局若落在寒冬月，原值会被 ±30% 推出带外 —— 那是周期噪声，不是模型错。
+ *    除掉之后剩下的才是 `K/((1−rf)×41.02)` 这个纯常数带。
+ */
+probe('终局 现金/年营收 ∈ [0.20, 0.32]（先除掉成本寒冬的乘数）', () => {
+  const s = A.s;
+  const month = gameMonths(s);
+  const R = rates(s);
+  const ratio = s.money / winterAt(month) / R.revenue;
+  need(ratio >= 0.20 && ratio <= 0.32,
+    `终局 现金/年营收 = ${(ratio * 100).toFixed(1)}%（应落在 20%–32%）—— 就是用户报的「年营收几万亿、储备才几百亿」那一项`);
+  return `${(ratio * 100).toFixed(1)}%（现金 ¥${fmt(s.money)} ／ 年营收 ¥${fmt(R.revenue)} · 第 ${month} 月 · 乘数 ${winterAt(month).toFixed(3)}）`;
 });
 
 probe('世界榜由玩家进度驱动（世界与日历同一真相源）', () => {
   const s = createState();
-  s.lines = { r: 40, m: 40, h: 40 };
+  s.lines = bal(40);
   tick(s, 0);
   const m = gameMonths(s);
   need(s.world.month === m, `世界推进到 ${s.world.month} 月，日历却是 ${m} 月`);
@@ -790,6 +944,36 @@ probe('世界榜由玩家进度驱动（世界与日历同一真相源）', () =
   need(s.world.month < ahead, `跑在前面的世界没有被拉回（停在 ${s.world.month} 月）`);
   need(s.world.month === gameMonths(s), `拉回后世界月 ${s.world.month} ≠ 日历 ${gameMonths(s)}`);
   return `世界月 = 日历月 = ${m}（曾跑到 ${ahead}）`;
+});
+
+probe('市值榜三层周期都写进日志：大盘峰谷 / 行业轮动 / 黑天鹅', () => {
+  /**
+   * 用户 2026-09-27：「市值榜的周期要有日志或者事件显示」。
+   * 三层周期原本是**看不见的**（名次在动，但不知道为什么动），`cycleNotes()` 把它们写成人话。
+   * 这里验三件事：① 幂等（同一区间跑两次逐字一致）；② 三种标签都真的会出现；
+   * ③ **回拉分支不重播** —— 那是「重建 + 推进到 target」，在那里播报会把整局重放一遍。
+   */
+  const w = createWorld('B');
+  advanceWorld(w, 480);
+  const once = cycleNotes(0, 480, w);
+  need(cycleNotes(0, 480, w).join('|') === once.join('|'), 'cycleNotes 不幂等（同区间两次结果不同）');
+  const has = tag => once.some(t => t.startsWith(tag));
+  need(has('【大盘】'), '一整局都没有大盘（泡沫峰谷 / AI 回撤）的播报');
+  need(has('【轮动】'), '一整局都没有行业轮动的播报');
+  need(has('【黑天鹅】'), '一整局都没有黑天鹅的播报');
+  need(once.filter(t => t.startsWith('【黑天鹅】')).length <= 480, '黑天鹅播报条数超过月数（没有做到每月最多一条）');
+  // 空区间 / 倒序区间都必须给空数组，否则回拉时会凭空多出几行
+  need(cycleNotes(480, 480, w).length === 0, '空区间竟然有播报');
+  need(cycleNotes(200, 100, w).length === 0, '倒序区间竟然有播报');
+  // 回拉分支不重播：跑一次 tick 把世界推到 target，日志里周期条数应当等于 cycleNotes 的长度
+  const s = createState();
+  s.lines = bal(60);
+  tick(s, 0);
+  advanceWorld(s.world, gameMonths(s) + 240);        // 恶意把世界推到很前面
+  tick(s, 0);                                        // 触发回拉
+  const cyc = s.log.filter(t => /^【(大盘|轮动|黑天鹅)】/.test(t)).length;
+  need(cyc < 60, `回拉分支把周期事件重播了（日志里 ${cyc} 条周期播报）`);
+  return `${once.length} 条 · 大盘/轮动/黑天鹅齐 · 回拉不重播`;
 });
 
 // ═══════════════════════════ §1.7 离线结算 ═══════════════════════════
@@ -896,14 +1080,14 @@ probe('calMonth 是派生缓存，不进存档', () => {
   return '不入档，读档后由 tick 重算';
 });
 
-probe('旧版本（v18 及以前）一律判为不可迁移，给新档', () => {
-  need(SAVE_VERSION === 19, `SAVE_VERSION=${SAVE_VERSION}`);
-  for (const v of [1, 8, 18]) {
+probe('旧版本（v20 及以前）一律判为不可迁移，给新档', () => {
+  need(SAVE_VERSION === 21, `SAVE_VERSION=${SAVE_VERSION}`);
+  for (const v of [1, 8, 18, 19, 20]) {
     need(deserialize(JSON.stringify({ version: v, act: 8, buildings: {} })) === null, `v${v} 竟然被迁移了`);
   }
   need(deserialize('{ 不是 JSON') === null, '坏 JSON 没有兜住');
   need(deserialize(null) === null, 'null 没有兜住');
-  return 'v1/v8/v18 全部拒绝';
+  return 'v1/v8/v18/v19/v20 全部拒绝';
 });
 
 probe('手改存档被夹取到合法区间', () => {
@@ -957,7 +1141,7 @@ probe('ACTION_SELECTOR 由 ACTION_KEYS 生成，主事件是 pointerdown', () =>
   return `${ACTION_SELECTOR.length} 字符 · ${PRIMARY_EVENT}`;
 });
 
-probe('渲染出的动作键全部落在 ACTION_KEYS 内（主界面 + 两个弹窗）', () => {
+probe('渲染出的动作键全部落在 ACTION_KEYS 内（四个页签 + 三个弹窗）', () => {
   const s = midState(4, 33);
   s.finance.rounds = ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'];
   const stray = [];
@@ -966,30 +1150,49 @@ probe('渲染出的动作键全部落在 ACTION_KEYS 内（主界面 + 两个弹
       for (const k of Object.keys(b.data)) if (!ACTION_KEYS.includes(k)) stray.push(`data-${k}`);
     }
   };
-  // 两个页签都要收 —— 只收当前页等于「市值榜」上的动作键从来没被审过
-  collect((lookTab(s, 0), root.innerHTML));
-  collect((lookTab(s, 1), root.innerHTML));
+  // **四个页签都要收** —— 只收当前页，别的页上的动作键就从来没被审过
+  for (const i of [0, 1, 2, 3]) collect((lookTab(s, i), root.innerHTML));
   collect((renderSettings(overlay, s), overlay.innerHTML));
   collect((renderEnding(overlay, s), overlay.innerHTML));
-  collect((renderNotTop(overlay, 5), overlay.innerHTML));
+  collect((renderNotTop(overlay, 3), overlay.innerHTML));
   need(!stray.length, `出现了没人管的动作键：${[...new Set(stray)].join('、')}`);
-  return '五个界面全部合规';
+  return '七个界面全部合规';
 });
 
-probe('主界面按钮齐全：三条投资线 / 三个倍速 / 设置 / 退休 / 待决两项', () => {
+probe('主界面按钮齐全：五条线分两页 / 三个倍速 / 设置 / 待决两项', () => {
   const s = midState(2, 20);
-  const btns = lookTab(s, 0);
-  const buys = btns.filter(b => b.data.buy !== undefined);
-  need(buys.length === 3, `投资线按钮 ${buys.length} 个`);
-  need(LINE_IDS.every(id => buys.some(b => b.data.buy === id)), '三条线的 id 不全');
-  const speeds = btns.filter(b => b.data.speed !== undefined).map(b => b.data.speed);
+  const company = lookTab(s, TAB_COMPANY);
+  const founder = lookTab(s, TAB_FOUNDER);
+  const buys = [...company, ...founder].filter(b => b.data.buy !== undefined);
+  need(company.filter(b => b.data.buy !== undefined).length === 2, '公司页不是两条资产线');
+  need(founder.filter(b => b.data.buy !== undefined).length === 3, '创始人页不是三条线');
+  need(LINE_IDS.every(id => buys.some(b => b.data.buy === id)), '五条线的 id 不全');
+  const speeds = company.filter(b => b.data.speed !== undefined).map(b => b.data.speed);
   need(speeds.join(',') === '1,4,8', `倍速按钮是 ${speeds.join(',')}`);
-  need(btns.some(b => b.data.settings !== undefined), '缺少设置按钮 ⚙');
-  need(btns.some(b => b.data.retire !== undefined), '缺少退休按钮');
-  need(btns.filter(b => b.data.opt !== undefined).length === 2, '待决选项不是两项');
-  const labels = visible(root.innerHTML);
-  for (const l of LINES) need(labels.includes(l.name) && labels.includes(l.who), `投资线缺「${l.name}/${l.who}」`);
-  return `${btns.length} 个可点元素`;
+  need(company.some(b => b.data.settings !== undefined), '缺少设置按钮 ⚙');
+  // **页头恒一行**（用户 2026-09-27）：日期与章名住在公司名下方（`.brand` 里那一行 span）；
+  // 「退休」按钮**不住页头**，而且**只在登顶之后才出现** —— 这一条在非结局态就得守住，
+  // 否则它会变成一颗常驻按钮（用户明确否决过两次）。
+  const headHtml = /<header class="head">[\s\S]*?<\/header>/.exec(root.innerHTML)?.[0] || '';
+  need(/class="brand"/.test(headHtml) && headHtml.includes(gameDate(s)),
+    '页头里公司名与日期/章名没有收在同一块 `.brand` 里');
+  need(!/data-retire/.test(headHtml), '退休按钮又挤回页头了（那正是页头折行的主因）');
+  need(!/data-retire/.test(root.innerHTML), '还没登顶就挂出了「退休」按钮 —— 它只该在登顶后出现');
+  need(!/class="date"/.test(root.innerHTML), '旧版独立的 `.date` 节点还在（页头会折行）');
+  need(company.filter(b => b.data.opt !== undefined).length === 2, '待决选项不是两项');
+  // 资产线在按钮上显示的是**按章取的名字** + 「资产」，不是固定的 id 名
+  const companyText = visible((lookTab(s, TAB_COMPANY), root.innerHTML));
+  for (const id of ['c', 'd']) {
+    const l = LINES.find(x => x.id === id);
+    need(companyText.includes(lineName(l, s.stage)) && companyText.includes(l.who),
+      `公司页缺「${lineName(l, s.stage)}/${l.who}」`);
+  }
+  const founderText = visible((lookTab(s, TAB_FOUNDER), root.innerHTML));
+  for (const id of ['r', 'm', 'h']) {
+    const l = LINES.find(x => x.id === id);
+    need(founderText.includes(l.name) && founderText.includes(l.who), `创始人页缺「${l.name}/${l.who}」`);
+  }
+  return `${buys.length} 条线分两页 · ${company.length} 个可点元素`;
 });
 
 probe('倍速按钮点亮的是当前档位（.on 唯一）', () => {
@@ -1005,35 +1208,184 @@ probe('倍速按钮点亮的是当前档位（.on 唯一）', () => {
   return '1× / 4× / 8× 各自唯一点亮';
 });
 
-probe('页签：切到「市值榜」换内容，且这个态住在模块里（全量重建不丢）', () => {
+probe('页签：四个页签各换内容，且这个态住在模块里（全量重建不丢）', () => {
   const s = midState(2, 20);
-  lookTab(s, 0);
+  lookTab(s, TAB_COMPANY);
   need(root.innerHTML.includes('class="lines"') && !root.innerHTML.includes('class="rank"'),
-    '「公司」页应只有投资线、没有榜单');
+    '「公司」页应只有资产线与待决、没有榜单');
   const tabs = buttonsIn(root.innerHTML).filter(b => b.data.tab !== undefined);
-  need(tabs.length === 2, `页签 ${tabs.length} 个（应为 2）`);
-  need(visible(root.innerHTML).includes('公司') && visible(root.innerHTML).includes('市值榜'), '两个页签的文案不全');
-  lookTab(s, 1);
-  need(root.innerHTML.includes('class="rank"') && !root.innerHTML.includes('class="lines"'),
-    '「市值榜」页应只有榜单、没有投资线');
-  need(/<button class="tab on" data-tab="1">/.test(root.innerHTML), '「市值榜」页的页签没有点亮');
-  // 全量重建一次：页签状态若留在 DOM 的 class 上，这一下就会弹回「公司」
+  need(tabs.length === 4, `页签 ${tabs.length} 个（应为 4）`);
+  for (const t of ['创始人', '公司', '订单', '市值榜']) {
+    need(visible(root.innerHTML).includes(t), `页签缺「${t}」`);
+  }
+  // 四个页的内容两两互斥
+  const look = i => { lookTab(s, i); return root.innerHTML; };
+  const isRank = h => h.includes('class="rank"');
+  const nLines = h => (h.match(/class="line"/g) || []).length;
+  const nOrders = h => (h.match(/class="order"/g) || []).length;
+  need(nLines(look(TAB_FOUNDER)) === 3 && !isRank(look(TAB_FOUNDER)), '「创始人」页不是三条线');
+  need(nLines(look(TAB_COMPANY)) === 2 && !isRank(look(TAB_COMPANY)), '「公司」页不是两条资产线');
+  // 待决卡片长在「公司」页（用户 2026-09-27 修正），且它的页签在有待决时亮起来
+  need(look(TAB_COMPANY).includes('class="pending"'), '「公司」页没有待决卡片');
+  need(/<button class="tab[^"]* hot" data-tab="1">/.test(look(TAB_COMPANY)), '有待决时「公司」页签没亮 .hot');
+  need(!look(TAB_FOUNDER).includes('class="pending"'), '待决卡片不该出现在「创始人」页');
+  need(look(TAB_ORDER).includes('class="orders"') && !isRank(look(TAB_ORDER)) && nOrders(look(TAB_ORDER)) >= 0, '「订单」页没有订单区');
+  need(isRank(look(TAB_RANK)) && nLines(look(TAB_RANK)) === 0, '「市值榜」页应只有榜单');
+  need(/<button class="tab on" data-tab="3">/.test(look(TAB_RANK)), '「市值榜」页的页签没有点亮');
+  // 全量重建一次：页签状态若留在 DOM 的 class 上，这一下就会弹回默认页
   render(root, s);
-  need(root.innerHTML.includes('class="rank"'), '重建一帧后页签弹回了「公司」—— 交互态没住在模块里');
+  need(root.innerHTML.includes('class="rank"'), '重建一帧后页签弹回了默认页 —— 交互态没住在模块里');
   // 日志条与 HUD 跨页签常驻
   need(root.innerHTML.includes('class="log"'), '「市值榜」页把日志条弄丢了');
-  need((root.innerHTML.match(/class="cell"/g) || []).length === 4, '「市值榜」页把 HUD 弄丢了');
+  need((root.innerHTML.match(/class="cell[ "]/g) || []).length === 4, '「市值榜」页把 HUD 弄丢了');
   setTab(0);
-  return '两页内容互斥 · 状态存活于重建';
+  return '四页内容互斥 · 状态存活于重建';
+});
+
+// ═══════════════════════════ 订单（现金的第二个来源）═══════════════════════════
+
+probe('订单：零随机 —— 同一份存档永远跑出同一串档位与金额', () => {
+  need(ORDER_TIERS.length === 6 && HOT_TIER === ORDER_TIERS[3].tier, '档位表被改过（大单门槛与档位表不再对齐）');
+  // 源码级：orders.js 里不许出现 Math.random —— 否则无头工具断言不了任何东西
+  // ⚠️ 先剥掉注释再判：文件头自己就写着「零 Math.random()」这句话，直接匹配会误伤。
+  const raw = srcOf('src/core/orders.js')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|\n)\s*\/\/[^\n]*/g, '$1');
+  need(!/Math\.random/.test(raw), 'orders.js 里出现了 Math.random（订单必须是确定性的）');
+  /** 从 0 跑 48 个月，逐月记录 [在手档位串, 现金] */
+  const run = () => {
+    const s = createState();
+    s.calMonth = 0;
+    s.orders = { next: 0, live: [] };
+    const seen = [];
+    for (let m = 0; m <= 48; m++) {
+      s.calMonth = m;
+      ordersTick(s, rates(s));
+      need(liveCount(s) <= ORDER_SLOTS, `第 ${m} 月在手 ${liveCount(s)} 条 > 上限 ${ORDER_SLOTS}`);
+      seen.push(liveOf(s).map(o => `${o.tier}@${o.born}`).join(',') + `#${s.money.toFixed(4)}`);
+    }
+    return seen.join('|');
+  };
+  const one = run();
+  need(one === run(), '同一份存档两次跑出不同的订单串 —— 订单里有随机');
+  // 48 个月 ÷ 9 月/条 ≈ 6 条排期，而每条只放 12 个月 ⇒ 每条都会走一遍「到期自动交付」那条分支
+  return `48 个月逐月一致 · 排期 ${ORDER_EVERY_MONTHS} 月/条 · 在手 ≤ ${ORDER_SLOTS}`;
+});
+
+probe('订单：槽位满时**跳过**这一条（不排队）—— 挂机不会一次涌出十几条', () => {
+  const s = createState();
+  s.calMonth = ORDER_EVERY_MONTHS;                  // 第 2 条该生成的月份（排期 9 月/条）
+  s.orders = {
+    next: 0,
+    live: [0, 1, 2].map(i => ({ uid: 900 + i, tier: ORDER_TIERS[i].tier, born: 0 })),
+  };
+  s.uidSeq = 902;
+  ordersTick(s, rates(s));
+  need(liveCount(s) === 3, `槽位满时在手变成 ${liveCount(s)} 条`);
+  need(liveOf(s).every(o => o.uid <= 902), '槽位满时仍然塞进了新单 —— 挂机会一次涌出十几条');
+  need(s.orders.next === 2, `next 没有前进（${s.orders.next}）—— 攒着的单会在某个月一起冒出来`);
+  return `3 / ${ORDER_SLOTS} 条封顶 · next 照常前进`;
+});
+
+probe('订单：准时交付 ×1.0、到期自动交付 ×0.9（两个价，没有第三个）', () => {
+  need(AUTO_DELIVER === 0.9, `自动交付折扣是 ${AUTO_DELIVER}`);
+  // ① 玩家点 ⇒ ×1.0
+  const s = midState(3, 30);
+  s.orders = { next: 1e9, live: [{ uid: 41, tier: ORDER_TIERS[3].tier, born: gameMonths(s) }] };
+  const R = rates(s);
+  const o = s.orders.live[0];
+  const want = valueOf(R, o);
+  let before = s.money;
+  need(deliverOrder(s, 41, R), '交付失败（uid 对得上）');
+  need(Math.abs(s.money - before - want) < 1e-6, `准时交付不是 ×1.0（实得 ${((s.money - before) / want).toFixed(3)}）`);
+  need(liveCount(s) === 0, '交付后没有出队');
+  need(deliverOrder(s, 41, R) === false, '同一个 uid 交付了两次（界面拿到过期节点时会白给钱）');
+  // ② 到期未点 ⇒ ×0.9
+  const s2 = midState(3, 30);
+  const R2 = rates(s2);
+  s2.orders = {
+    next: 1e9,
+    live: [{ uid: 51, tier: ORDER_TIERS[5].tier, born: gameMonths(s2) - ORDER_LIFE_MONTHS }],
+  };
+  const want2 = valueOf(R2, s2.orders.live[0]) * AUTO_DELIVER;
+  const before2 = s2.money;
+  ordersTick(s2, R2);
+  need(liveCount(s2) === 0, '到期没有自动交付');
+  need(Math.abs(s2.money - before2 - want2) < 1e-6, `自动交付不是 ×${AUTO_DELIVER}`);
+  // ③ 报酬不进收入公式：发一笔订单钱，年营收一动不动
+  const rev = rates(s2).revenue;
+  const s3 = midState(3, 30);
+  s3.orders = { next: 1e9, live: [{ uid: 61, tier: ORDER_TIERS[5].tier, born: gameMonths(s3) }] };
+  deliverOrder(s3, 61, rates(s3));
+  need(rates(s3).revenue === rev, '订单钱进了收入公式（年营收被订单抬高了）');
+  /**
+   * 一单的**档位均值**占年营收几个百分点 —— 用户 2026-09-27 报的就是这个数（当时 0.047 档）。
+   * 它只算「档位」那一层；类别（均值 1.1875）与形态（均值 1.05）再各乘一次，
+   * 所以真实单笔在 `档位均值 × 0.71 ~ 1.67` 之间浮动（最低档 × 最便宜形态 → 最高档 × 最贵形态）。
+   */
+  const meanPayEq = ORDER_TIERS.reduce((a, t) => a + t.payEq, 0) / ORDER_TIERS.length;
+  const meanPct = meanPayEq / SEC_PER_YEAR * 100;
+  need(meanPct >= 7, `一单档位均值只有 ${meanPct.toFixed(1)}% 年营收 —— 订单又退回「边角料」了`);
+  return `×1.0 / ×${AUTO_DELIVER} · 一单档位均值 ≈ ${meanPct.toFixed(1)}% 年营收`;
+});
+
+probe('订单页：在手条数挂上页签、大单时页签亮起、交付按钮合规', () => {
+  const s = midState(2, 20);
+  s.orders = { next: 1e9, live: [] };
+  const blank = lookTab(s, 2);
+  need(root.innerHTML.includes('class="orders"') && root.innerHTML.includes('class="o-empty"'),
+    '没有订单时订单页既没有订单区也没有空态');
+  need(!blank.some(b => b.data.order !== undefined), '空态下却有交付按钮');
+  // 普通单 + 大单
+  const m0 = gameMonths(s);
+  // 六档下「大单」= 下标 ≥ 3 的那一半（`orders.HOT_TIER`），所以第二条取第 5 档才亮
+  s.orders.live = [
+    { uid: 61, tier: ORDER_TIERS[0].tier, born: m0 },
+    { uid: 62, tier: ORDER_TIERS[4].tier, born: m0 },
+  ];
+  const btns = lookTab(s, 2);
+  // 普通单渲染成 class="order"，大单渲染成 class="order hot" —— 正则要同时认这两种
+  need((root.innerHTML.match(/class="order[" ]/g) || []).length === 2, '两条在手订单没渲染出来');
+  const hotRows = (root.innerHTML.match(/class="order hot"/g) || []).length;
+  need(hotRows === 1, `大单高亮 ${hotRows} 行（应为 1 行 —— 普通单不该亮）`);
+  // 页签：在手 2 条 ⇒ 角标 2；有大单 ⇒ .hot（不切页也该看见）
+  const tabBtn = /<button class="([^"]*)" data-tab="2">([^<]*)<\/button>/.exec(root.innerHTML);
+  need(tabBtn, '找不到订单页签');
+  need(/\bhot\b/.test(tabBtn[1]), '在手有大单，订单页签却没亮');
+  need(/2/.test(tabBtn[2]), `页签上没有在手条数（读到「${tabBtn[2]}」）`);
+  // 交付按钮：data-order = uid，且按时长显示剩余月数
+  const dels = btns.filter(b => b.data.order !== undefined);
+  need(dels.length === 2, `交付按钮 ${dels.length} 个（应为 2）`);
+  need(ACTION_KEYS.includes('order'), 'data-order 没进 bind.js 的动作键白名单 —— 点了会被当成杂音丢掉');
+  need(dels.every(b => b.data.order === '61' || b.data.order === '62'), '交付按钮的 uid 对不上在手订单');
+  need(visible(root.innerHTML).includes('剩余'), '交付单上没有剩余月数');
+  /**
+   * 两行布局 + 分割线 + 右上「已完成 N 项」（用户 2026-09-27）。
+   * 一条单必须**恰好两个块**：`.o-nm`（甲方 + 报酬）与 `.o-act`（内容 + 剩余 + 按钮）——
+   * 这样甲方永远在第一行、按钮永远在第二行右端，不会因为字数不同而版式乱掉。
+   */
+  need((root.innerHTML.match(/class="o-nm"/g) || []).length === 2, '订单没有按两行渲染（缺 .o-nm）');
+  need((root.innerHTML.match(/class="o-act"/g) || []).length === 2, '订单没有按两行渲染（缺 .o-act）');
+  need(/class="o-head">[\s\S]*?已完成 <b>/.test(root.innerHTML), '在手订单右上角没有「已完成 N 项」');
+  need(doneCount(s) === 0, `还没交付就报「已完成 ${doneCount(s)} 项」`);
+  need(!s.ending && deliverOrder(s, 62, rates(s)), '从界面拿到的大单交付不了');
+  need(liveCount(s) === 1, '交付后在手条数没减');
+  need(doneCount(s) === 1, `交付一单后累计数没 +1（实得 ${doneCount(s)}）`);
+  setTab(0);
+  return `在手 2 条 → 1 条 · 大单 1 行高亮 · 已完成 ${doneCount(s)} 项`;
 });
 
 probe('归零按钮（买不起）仍然是可点元素 —— 只是压暗', () => {
   const s = midState(2, 20);
   s.money = 0;
-  const btns = lookTab(s, 0);
+  const btns = lookTab(s, TAB_COMPANY);
   const buys = btns.filter(b => b.data.buy !== undefined);
-  need(buys.length === 3 && buys.every(b => !b.disabled), '买不起的投资线按钮被 disabled 了（会点不动）');
+  need(buys.length === 2 && buys.every(b => !b.disabled), '买不起的资产线按钮被 disabled 了（会点不动）');
   need(root.innerHTML.includes('dim'), '买不起时没有视觉提示');
+  // 创始人页同理：三条线都不 disabled
+  const f = lookTab(s, TAB_FOUNDER).filter(b => b.data.buy !== undefined);
+  need(f.length === 3 && f.every(b => !b.disabled), '买不起的创始人线被 disabled 了');
+  setTab(0);
   return '不 disabled，只压暗';
 });
 
@@ -1041,15 +1393,20 @@ probe('登顶即定格：界面只剩回看，且 tick 不再改变任何东西'
   const s = midState(5, 40);
   s.ending = 'top';
   s.pending = [{ uid: 9, id: 'e11' }];            // 定格时连待决选项也不许点
-  const btns = lookTab(s, 0);
-  const frozen = btns.filter(b =>
-    b.data.buy !== undefined || b.data.speed !== undefined || b.data.opt !== undefined);
-  need(frozen.length === 3 + 3 + 2, `可点元素不是 8 个（实得 ${frozen.length}）`);
+  // ⚠️ 待决选项 + 2 条资产线在「公司」页，3 条创始人线在另一页；
+  //    倍速在页头（两页都渲染），所以只能从一页里数一次，否则会重复计数。
+  const companyBtns = lookTab(s, TAB_COMPANY);
+  const founderBtns = lookTab(s, TAB_FOUNDER);
+  const frozen = companyBtns.filter(b => b.data.buy !== undefined || b.data.opt !== undefined)
+    .concat(founderBtns.filter(b => b.data.buy !== undefined))
+    .concat(founderBtns.filter(b => b.data.speed !== undefined));
+  need(frozen.length === 2 + 2 + 3 + 3, `可点元素不是 10 个（实得 ${frozen.length}）`);
   need(frozen.every(b => b.disabled), '定格后仍有能点动的买卖 / 倍速 / 选项按钮');
-  // 退休与设置不许禁：前者是结局弹窗的入口，后者是删档的唯一入口
-  need(btns.some(b => b.data.retire !== undefined && !b.disabled), '定格把「退休」也禁掉了');
-  need(btns.some(b => b.data.settings !== undefined && !b.disabled), '定格把「设置」也禁掉了');
-  need(root.innerHTML.includes('已登顶 · 时间冻结'), '定格后没有挂出「已登顶 · 时间冻结」');
+  // 设置不许禁：它是删档的唯一入口。
+  // 「退休」横条同样不许禁 —— 登顶之后点它就是「再看一遍结局」，禁掉反而没路回去看。
+  need(companyBtns.some(b => b.data.settings !== undefined && !b.disabled), '定格把「设置」也禁掉了');
+  need(companyBtns.some(b => b.data.retire !== undefined && !b.disabled), '定格把「退休」横条也禁掉了');
+  need(!root.innerHTML.includes('已登顶 · 时间冻结'), '定格后还挂着旧版那条「已登顶 · 时间冻结」提示');
   // 冻结必须发生在引擎里，不能只是界面装样子
   const snap = JSON.stringify({
     money: s.money, elapsed: s.elapsed, stage: s.stage,
@@ -1061,7 +1418,7 @@ probe('登顶即定格：界面只剩回看，且 tick 不再改变任何东西'
     lines: s.lines, calMonth: s.calMonth, rank: s.worldRank, hasWorld: !!s.world,
   }) === snap, '定格后 12345 秒的 tick 仍在推进（时间没冻结）');
   setTab(0);
-  return '8 个按钮全禁 · tick 空转';
+  return '10 个按钮全禁 · tick 空转';
 });
 
 probe('两步删档：第一次只改文案，第二次才真删', () => {
@@ -1081,6 +1438,19 @@ probe('两步删档：第一次只改文案，第二次才真删', () => {
   renderSettings(overlay, s);
   need(!visible(overlay.innerHTML).includes('再点一次'), 'disarm 之后确认态没复位');
   return '武装 → 确认 → 复位';
+});
+
+probe('设置里有音效开关，且开关反映 s.sfx（默认开）', () => {
+  const s = midState(2, 20);
+  need(s.sfx === true, '新档的音效开关默认不是「开」');
+  renderSettings(overlay, s);
+  need(overlay.innerHTML.includes('data-audio'), '设置弹窗里没有音效开关');
+  need(visible(overlay.innerHTML).includes('音效：开'), '默认没显示成「音效：开」');
+  s.sfx = false;
+  renderSettings(overlay, s);
+  need(visible(overlay.innerHTML).includes('音效：关'), '关掉后没显示成「音效：关」');
+  s.sfx = true;
+  return '音效：开 ↔ 关';
 });
 
 probe('pointerdown 只派发一次；指针来源的 click 不重复派发；键盘 detail=0 兜底', () => {
@@ -1137,7 +1507,7 @@ probe('四个弹窗关掉后 overlay 都真正清空（#overlay:empty 才成立 
   const draws = [
     ['设置', () => renderSettings(layer, s)],
     ['结局', () => renderEnding(layer, s)],
-    ['还差一点', () => renderNotTop(layer, 5)],
+    ['还差一点', () => renderNotTop(layer, 3)],
     ['离线报告', () => renderOffline(layer, { capped: OFFLINE_CAP_SEC, cappedOut: true, equiv: 60, report: null })],
   ];
   for (const [name, draw] of draws) {
@@ -1187,40 +1557,49 @@ probe('真实接线跑一遍：从渲染出的 HTML 点到待决选项与投资�
     }
   });
   const fire = el => appBox.fire(PRIMARY_EVENT, { target: el, cancelable: true, detail: 1, stopPropagation() {}, preventDefault() {} });
-  const btns = lookTab(s, 0);
+  const btns = lookTab(s, TAB_COMPANY);           // 待决选项长在「公司」页
   const optBtn = btns.find(b => b.data.opt !== undefined);
   need(optBtn, '界面上找不到待决选项按钮');
   fire(targetOf(optBtn.data));
   need(resolved === 1, '点了选项却没有结算');
   need(s.decisions === 1, '决策计数没涨');
   need(s.pending.length === 0, '待决没有出队');
-  s.money = costFor(s, 'h');
-  fire(targetOf({ buy: 'h' }));
+  // 现金：可动用那笔（现金 × (1 − RESERVE_FRAC)）要够付 MANUAL_PAY 份还富余
+  s.money = manualCostOf(s, 'h') / (1 - RESERVE_FRAC);
+  fire(targetOf({ buy: 'h' }));                          // h（投招聘）在「创始人」页
   need(bought === 1 && lineLevel(s, 'h') === 21, `投资线没买到（Lv${lineLevel(s, 'h')}）`);
+  // 资产线在「公司」页 —— 两条资产线共用同一条闸门，也要真点一次
+  s.money = manualCostOf(s, 'c') / (1 - RESERVE_FRAC);
+  fire(targetOf({ buy: 'c' }));
+  need(bought === 2 && lineLevel(s, 'c') === 21, `资产线没买到（Lv${lineLevel(s, 'c')}）`);
   return '选项 + 投资线都点到';
 });
 
 // ═══════════════════════════ 渲染烟测 ═══════════════════════════
 
-probe('七个阶段逐一渲染都不抛错，且都有世界榜与四格 HUD', () => {
-  for (let a = 1; a <= 7; a++) {
-    // ⚠️ 这里**不 tick**：tick 会因为市值超门槛自动推幕，测不到「第 a 幕长什么样」
+probe('八个阶段逐一渲染都不抛错，且都有世界榜与四格 HUD', () => {
+  for (let a = 1; a <= 8; a++) {
+    // ⚠️ 这里**不 tick**：tick 会因为市值超门槛自动推章，测不到「第 a 章长什么样」
     const s = createState();
     s.stage = a;
-    s.lines = { r: a * 4, m: a * 4, h: a * 4 };
-    lookTab(s, 1);
+    s.lines = bal(a * 4);
+    lookTab(s, TAB_RANK);                       // 世界榜在「市值榜」页（第 4 个页签）
     const html = root.innerHTML;
-    need(html.includes('世界市值榜'), `第 ${a} 幕没有世界榜`);
-    need(html.includes('单位：万亿美元'), `第 ${a} 幕榜单没有单位标签`);
-    need((html.match(/class="cell"/g) || []).length === 4, `第 ${a} 幕 HUD 不是四格`);
-    need(html.includes(ACTS[a].place), `第 ${a} 幕没显示地点（${ACTS[a].place}）`);
-    need(visible(html).includes(ACTS[a].goal), `第 ${a} 幕没显示目标`);
-    // 投资线在「公司」页 —— 两页都要看一眼，不能只验其中一页
-    lookTab(s, 0);
-    need((root.innerHTML.match(/class="line"/g) || []).length === 3, `第 ${a} 幕投资线不是三条`);
+    need(html.includes('世界市值榜'), `第 ${a} 章没有世界榜`);
+    need(html.includes('单位：万亿美元'), `第 ${a} 章榜单没有单位标签`);
+    need((html.match(/class="cell[ "]/g) || []).length === 4, `第 ${a} 章 HUD 不是四格`);
+    need(html.includes(ACTS[a].place), `第 ${a} 章没显示地点（${ACTS[a].place}）`);
+    need(visible(html).includes(ACTS[a].goal), `第 ${a} 章没显示目标`);
+    // 五条线分两页 —— 两页都要看，不能只验其中一页
+    lookTab(s, TAB_FOUNDER);
+    need((root.innerHTML.match(/class="line"/g) || []).length === 3, `第 ${a} 章创始人页不是三条线`);
+    lookTab(s, TAB_COMPANY);
+    need((root.innerHTML.match(/class="line"/g) || []).length === 2, `第 ${a} 章公司页不是两条资产线`);
+    lookTab(s, TAB_ORDER);
+    need(root.innerHTML.includes('class="orders"'), `第 ${a} 章订单页没有订单区`);
   }
   setTab(0);
-  return '1–7 幕全部可渲染';
+  return '1–8 章全部可渲染';
 });
 
 probe('创始人只出现在文案里，不进任何公式', () => {
@@ -1230,11 +1609,12 @@ probe('创始人只出现在文案里，不进任何公式', () => {
     need(!('skill' in f) && !('hp' in f) && !('mood' in f), `${f.id} 还挂着已删系统的字段`);
   }
   const ages1 = agesAt(1);
-  const ages7 = agesAt(7);
-  need(startYearOf(7) - startYearOf(1) === 30, '幕首年份跨度不是 30 年');
-  need(ages7.zhong === ages1.zhong + 30, '年龄没有随阶段推进');
-  const html = (render(root, midState(3, 30)), root.innerHTML);
-  need(FOUNDERS.every(f => html.includes(f.name)), '主界面没有展示创始人');
+  const ages8 = agesAt(8);
+  need(startYearOf(8) - startYearOf(1) === 34, '章首年份跨度不是 34 年（2026 → 2060，40 周年）');
+  need(ages8.zhong === ages1.zhong + 34, '年龄没有随阶段推进');
+  const html = (setTab(TAB_FOUNDER), render(root, midState(3, 30)), root.innerHTML);
+  need(FOUNDERS.every(f => html.includes(f.name)), '「创始人」页没有展示创始人');
+  setTab(0);
   // 三人名不进 rates：改名后速率必须一模一样
   const s = midState(3, 30);
   const before = JSON.stringify(rates(s));
@@ -1242,25 +1622,30 @@ probe('创始人只出现在文案里，不进任何公式', () => {
   const after = JSON.stringify(rates(s));
   FOUNDERS[0].name = '老钟';
   need(before === after, '改了创始人名字，速率竟然变了 —— 他进公式了');
-  return `年龄 ${ages1.zhong}→${ages7.zhong}`;
+  return `年龄 ${ages1.zhong}→${ages8.zhong}`;
 });
 
-probe('结局弹窗与「还差一点」弹窗都有关闭按钮', () => {
-  const s = midState(7, 160);
+probe('结局弹窗有关闭按钮，且弹窗里不出现名次', () => {
+  const s = midState(8, 160);
   renderEnding(overlay, s);
   need(visible(overlay.innerHTML).includes(ENDING_TEXT.top.title), '结局标题不对');
   need(lookOverlay(overlay.innerHTML).some(b => b.data.close !== undefined), '结局弹窗没有关闭按钮');
-  renderNotTop(overlay, 3);
-  need(visible(overlay.innerHTML).includes('世界第'), '未登顶提示没有写明名次');
-  need(lookOverlay(overlay.innerHTML).some(b => b.data.close !== undefined), '未登顶弹窗没有关闭按钮');
-  return '两个弹窗都可关';
+  /**
+   * 结局文案里**不许出现名次**（用户 2026-09-26：「退休为什么还显示了排名？我说过了不要显示」）。
+   * 会报名次的那一份是**未登顶**时的 `renderNotTop()`（「现在是世界第 N 名」）——
+   * 登顶了就不该再谈名次：第一行已经写的是你们的名字。
+   */
+  need(!/世界第/.test(visible(overlay.innerHTML)), '结局弹窗把名次写进来了');
+  need(!/\d+\s*名/.test(visible(overlay.innerHTML)), '结局弹窗里还有数字名次');
+  return '结局弹窗可关 · 不报名次';
 });
 
 probe('日志裁剪：不超过上限，且开局那句一定在', () => {
   const s = A.s;
   need(s.log.length <= LOG_MAX, `日志 ${s.log.length} 条 > 上限 ${LOG_MAX}`);
   need(s.log.some(t => t.includes('登顶')), '终局日志里没有登顶那条');
-  need(s.log.some(t => t.includes('【第')), '日志里没有年度报告');
+  // 年度报告写的是**日历 20xx 年**（用户 2026-09-27），不写「第 N 年」
+  need(s.log.some(t => /【20\d\d 年】/.test(t)), '日志里没有年度报告（应写日历年份）');
   for (const t of s.log) need(typeof t === 'string' && t.length, '日志里出现了空行');
   return `${s.log.length}/${LOG_MAX} 条`;
 });
@@ -1279,7 +1664,7 @@ probe('数字格式化：万亿/亿/万 口径正确', () => {
 
 // ═══════════════════════════ 验收带宽的自洽 ═══════════════════════════
 
-probe('验收带宽自洽：A 档 ⊆ [3,6]、D 档 ⊆ [3,18]、目标合计 = 4.8h', () => {
+probe('验收带宽自洽：A 档 ⊆ [3,6]、D 档 ⊆ [3,18]、目标合计 = 5.2h', () => {
   need(CURVE_BAND[0] === 3 && CURVE_BAND[1] === 6, `A 档带宽 ${CURVE_BAND}`);
   need(IDLE_BAND[0] === 3 && IDLE_BAND[1] === 18, `D 档带宽 ${IDLE_BAND}`);
   need(TARGET_TOTAL_H >= CURVE_BAND[0] && TARGET_TOTAL_H <= CURVE_BAND[1], '目标合计不在 A 档带宽内');
@@ -1313,15 +1698,24 @@ probe('汇率与 GDD 一致：1 万亿 USD = 7.2e12 元', () => {
   return '7.2e12';
 });
 
-probe('曲线目标与内容表一致：七幕门槛严格递增、代际 ×1.5', () => {
-  need(GENERATION === 1.5, `GENERATION=${GENERATION}`);
-  need(ACTS[7].mcap / ACTS[1].mcap > 1e9, '七幕跨度太小');
-  const genSum = LINES.length;   // 三条线共用同一个 g ⇒ 只需要一个 cost(n)
-  need(genSum === 3, '投资线不是三条');
-  need(Math.abs(LINE_GROWTH - CURVE_RATIO ** (1 / 3)) < 1e-12, 'g ≠ r^(1/3)');
+probe('曲线目标与内容表一致：八章门槛严格递增、五条线共用同一个 g', () => {
+  // 旧版这里守的是 `GENERATION === 1.5`（每幕 ×1.5 的隐藏乘数）—— 该常量已整块删除
+  // （用户 2026-09-26「去掉繁杂的，只保留精华」），曲线改由 ACTS[].mcap 单独承担。
+  for (let a = 1; a <= 7; a++) {
+    need(ACTS[a + 1].mcap > ACTS[a].mcap, `第 ${a} 章门槛没有严格递增`);
+  }
+  need(ACTS[8].mcap / ACTS[1].mcap > 1e6, `八章跨度太小（${(ACTS[8].mcap / ACTS[1].mcap).toExponential(2)}）`);
+  // 里程碑：严格递增、全部在前七章之内（第 8 章只留「登顶」一件事）
+  for (let i = 1; i < MILESTONES.length; i++) {
+    need(MILESTONES[i].v > MILESTONES[i - 1].v, `里程碑第 ${i} 项没有严格递增`);
+  }
+  need(MILESTONES[MILESTONES.length - 1].v < ACTS[8].mcap, '有个里程碑比第 8 章门槛还高 —— 它永远不会触发');
+  need(LINES.length === 5, `投资线不是五条（实得 ${LINES.length}）`);
+  need(Math.abs(LINE_GROWTH - CURVE_RATIO ** (1 / LINES.length)) < 1e-12, 'g ≠ r^(1/5)');
+  need(LINE_GROWTH > 1 && LINE_GROWTH < CURVE_RATIO, 'g 没有落在 (1, r) 之间');
   need(SEC_PER_YEAR * TOTAL_YEARS / 3600 > 0, 'SEC_PER_YEAR 与年数不自洽');
   need(INCOME_SCALE > 0 && costOf(0) > 0, '开局系数非法');
-  return `g=${LINE_GROWTH.toFixed(4)}`;
+  return `g=${LINE_GROWTH.toFixed(4)} ｜ 跨度 ${(ACTS[8].mcap / ACTS[1].mcap).toExponential(1)} ｜ 里程碑 ${MILESTONES.length} 条`;
 });
 
 // ═══════════════════════════ 真实启动烟测（最后跑）═══════════════════════════
@@ -1342,11 +1736,11 @@ try {
   const html = appEl.innerHTML || appEl.textContent || '';
   need(html.length > 0, '#app 一个字都没有（黑屏）');
   need(!html.includes('启动失败'), `启动链抛错：${visible(html).slice(0, 120)}`);
-  // 首帧落在「公司」页：投资线在、榜单不在（榜单在「市值榜」页，由页签探针覆盖）
-  need(html.includes('class="lines"'), '首帧没有渲染出投资线（「公司」页）');
+  // 首帧落在「创始人」页：投资线在、榜单不在（榜单在「市值榜」页，由页签探针覆盖）
+  need(html.includes('class="lines"'), '首帧没有渲染出投资线（「创始人」页）');
   const btns = buttonsIn(html);
-  need(btns.filter(b => b.data.buy !== undefined).length === 3, '首帧没有三条投资线按钮');
-  need(btns.filter(b => b.data.tab !== undefined).length === 2, '首帧没有两个页签');
+  need(btns.filter(b => b.data.buy !== undefined).length === 3, '首帧「创始人」页没有三条经营线按钮');
+  need(btns.filter(b => b.data.tab !== undefined).length === 4, '首帧没有四个页签');
   need(html.includes('class="log"'), '首帧没有日志条');
   need(overlayEl && overlayEl.innerHTML !== undefined, 'overlay 容器没接上');
   boot.ok = true;

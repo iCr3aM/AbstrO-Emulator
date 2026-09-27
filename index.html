@@ -4,6 +4,15 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Abstract Studio 创业模拟器</title>
+  <!--
+    favicon：**内联 SVG（data URI）**，不是文件。
+    理由与本项目的「零依赖」一致 —— 少一个文件就少一份要上传、要缓存、要不被 SFTP 漏掉的东西；
+    而且它跟着 index.html 一起走，永远不会与页面版本脱节。
+    图案 = 深底 + 四根递增的柱子（与投资线同构）+ 右上角一粒金点（登顶）。
+    ⚠️ `#` 必须写成 `%23`，否则会被当成 URL 片段（颜色全部丢失）。
+    ⚠️ `tools/postbuild.mjs` 只重写 `./assets/...` 的 URL，不会碰 data URI。
+  -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%230d0f12'/%3E%3Crect x='9' y='38' width='9' height='16' fill='%232f6f66'/%3E%3Crect x='22' y='30' width='9' height='24' fill='%234aa79a'/%3E%3Crect x='35' y='22' width='9' height='32' fill='%236ad1c0'/%3E%3Crect x='48' y='14' width='9' height='40' fill='%2386e3d2'/%3E%3Ccircle cx='52' cy='11' r='4' fill='%23c9b458'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/src/ui/style.css" />
 </head>
 <body>

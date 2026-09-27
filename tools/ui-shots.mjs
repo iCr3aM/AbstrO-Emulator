@@ -4,9 +4,9 @@
  * 为什么需要它：check / click / probe 全都跑在 DOM stub 里，**看不见排版**——
  * 「按钮换行」「文字叠在一起」「日志压住内容」这类问题只有真浏览器渲染才发现。
  * 本工具用 Playwright(Chromium) 把 dist 挂在真实部署路径 /studio/ 下，
- * 对 手机 / 桌面 × 新档 / 末期存档 各截一张图（共 4 张），存到 `.codebuddy/ui-shots/`。
+ * 对 手机 / 桌面 × 新档 / 末期存档 × 四个页签 各截一张图（共 16 张），存到 `.codebuddy/ui-shots/`。
  *
- * late 模式注入一份第 7 幕的大数值存档 —— 验证「¥2500.00万亿」这种量级
+ * late 模式注入一份第 8 幕的大数值存档 —— 验证「¥2500.00万亿」这种量级
  * 在 HUD / 榜单里不折行、不溢出（用户要求：数字变动之后不能换行）。
  * 该档刻意停在「已上市但名次 > 20」，好把榜单底部那行钉死的玩家行也截进去。
  *
@@ -20,6 +20,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createState, serialize, SAVE_KEY } from '../src/core/state.js';
+import { LINE_IDS } from '../src/core/content.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
@@ -28,13 +29,15 @@ const PREFIX = '/studio/';                       // 与真实部署路径一致
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
 
 /**
- * 末期存档：第 7 幕、三条线各 Lv120、已上市但名次 > 10。
- * 市值约 1.0 万亿 USD —— 足够大（HUD 出现「万亿」），又不至于登顶（否则结局弹窗会盖住主界面）。
+ * 末期存档：第 8 章、五条线各 Lv120、已上市但名次 > 10。
+ * 市值约 5.8 万亿 USD —— 足够大（HUD 出现「万亿」），又不至于登顶（否则结局弹窗会盖住主界面）。
+ * ⚠️ 章次写 8 而不是 7：第 7 章的门槛是 1.99e13 元，这个档一进第 7 章就会被推走。
+ * ⚠️ 五条线**同级**（`g^ΣL` 只由 ΣL 决定，所以加线不改市值）；漏掉 c/d 会少两个因子。
  */
 function lateSaveJson() {
   const s = createState();
-  s.stage = 7;
-  s.lines = { r: 120, m: 120, h: 120 };
+  s.stage = 8;
+  s.lines = Object.fromEntries(LINE_IDS.map(id => [id, 120]));
   s.money = 2.5e15;
   s.finance = { rounds: ['angel', 'preA', 'a', 'b', 'c', 'preIpo', 'ipo'] };
   s.log.push('【登顶】不要走到这里 —— 这份档停在名次 10 名之外。');
@@ -63,10 +66,12 @@ const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
 ];
 
-/** 两个页签各截一张 —— 只截一个页签等于另一页的排版从来没被看过 */
+/** 四个页签各截一张 —— 只截一个页签等于另外几页的排版从来没被看过 */
 const TABS = [
-  { name: 'co', label: '公司', idx: 0 },
-  { name: 'rank', label: '市值榜', idx: 1 },
+  { name: 'founder', label: '创始人', idx: 0, want: { lines: true, rank: false, orders: false } },
+  { name: 'co', label: '公司', idx: 1, want: { lines: true, rank: false, orders: false } },
+  { name: 'order', label: '订单', idx: 2, want: { lines: false, rank: false, orders: true } },
+  { name: 'rank', label: '市值榜', idx: 3, want: { lines: false, rank: true, orders: false } },
 ];
 
 let fails = 0;
@@ -128,7 +133,7 @@ for (const vp of VIEWPORTS) {
       const layout = await page.evaluate(() => {
         const wrap = [];
         const horiz = [];
-        for (const el of document.querySelectorAll('.tag, .row button, .hud .cell, .cost, .ic, .tab')) {
+        for (const el of document.querySelectorAll('.tag, .line .btn, .order .btn, .hud .cell, .cost, .ic, .tab')) {
           const cs = getComputedStyle(el);
           const contentH = el.clientHeight
             - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
@@ -153,8 +158,9 @@ for (const vp of VIEWPORTS) {
           wrap, horiz,
           hasRank: !!document.querySelector('.rank'),
           hasLines: !!document.querySelector('.lines'),
+          hasOrders: !!document.querySelector('.orders'),
           hasLog: !!document.querySelector('.log'),
-          tabOn: on ? on.textContent.trim() : '—',
+          tabOn: on ? on.textContent.trim().replace(/\s+\d+$/, '') : '—',
           hasMe: !!document.querySelector('.row.me'),
           // 真浏览器里量遮罩：`closeModal` 之后 `#overlay:empty` 必须成立、`display` 必须回到 none。
           // 「关掉弹窗还在 / 还吃掉全页点击」那个 bug 只有这一条能在真实 CSS 下抓住。
@@ -167,13 +173,12 @@ for (const vp of VIEWPORTS) {
       if (!layout.hasLog) { console.log('  ❌ 主界面里没有日志条'); fails++; }
       if (layout.overlayShown) { console.log('  ❌ 弹窗关闭后遮罩层还在（#overlay:empty 不成立）'); fails++; }
       if (layout.tabOn !== tb.label) { console.log(`  ❌ 页签高亮不对：「${tb.label}」页亮的是「${layout.tabOn}」`); fails++; }
-      if (tb.idx === 0 && (!layout.hasLines || layout.hasRank)) {
-        console.log('  ❌ 「公司」页结构不对（应只有投资线，没有榜单）'); fails++;
+      // 结构自检：四页内容互斥 —— 公司/创始人各只有投资线，订单页只有订单区，市值榜页只有榜单
+      const got = { lines: layout.hasLines, rank: layout.hasRank, orders: layout.hasOrders };
+      for (const [k, v] of Object.entries(tb.want)) {
+        if (got[k] !== v) { console.log(`  ❌ 「${tb.label}」页的 .${k} ${got[k] ? '出现了' : '不见了'}（应${v ? '有' : '无'}）`); fails++; }
       }
-      if (tb.idx === 1 && (!layout.hasRank || layout.hasLines)) {
-        console.log('  ❌ 「市值榜」页结构不对（应只有榜单，没有投资线）'); fails++;
-      }
-      if (era === 'late' && tb.idx === 1 && !layout.hasMe) {
+      if (era === 'late' && tb.idx === 3 && !layout.hasMe) {
         console.log('  ❌ 末期档（已上市）榜单里没有玩家行'); fails++;
       }
     }

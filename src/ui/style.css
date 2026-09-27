@@ -18,6 +18,10 @@
   --mut: #8f9aa6;
   --line: #232b34;
   --accent: #6ad1c0;
+  /* 选中态的淡底：`render.js` 每帧按当前章的主色重写（`主色 + 2e` 透明度的八位十六进制）。
+     这里给一份兜底 —— 万一 `setProperty` 没跑（老浏览器 / 探针里的假 root），
+     `.on` / `.hot` 仍然有底色，而不是变成 transparent。 */
+  --accent-soft: rgba(106, 209, 192, .18);
   --ok: #7bc47f;
   --bad: #e06c75;
   --gold: #c9b458;
@@ -42,22 +46,51 @@ html, body {
   padding: 0 12px calc(148px + env(safe-area-inset-bottom, 0px));
 }
 
-/* ── 页头（固定）——倍速 / 退休 / 设置都在这里 ── */
+/* ── 页头（固定）——**恒一行**：左边公司名 + 副行（日期 · 章节），右边倍速 / 定格提示 / ⚙ ──
+   ⚠️ `flex-wrap: nowrap` 是这一版的关键（用户 2026-09-27：「这样顶部就可以变为一行了」）。
+   原来日期与章节名跟公司名并排在同一行，左边那一块太宽 ⇒ 工具区被挤到第二行。
+   现在日期与章节挪到公司名**下方**（副行），左边宽度就只剩公司名，工具区永远放得下。
+   退休按钮同时删除（结局自动触发），空出的格子给「已登顶 · 时间冻结」，于是那块独立横条也没了。 */
 .head {
   position: sticky;
   top: 0;
   z-index: 5;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
   background: rgba(13, 15, 18, .94);
 }
-.head .brand { font-size: 16px; font-weight: 600; color: var(--accent); }
-.head .date { font-size: 12px; color: var(--mut); }
-.head .tools { margin-left: auto; display: flex; gap: 8px; }
+.head .brand { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.head .brand b {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.head .brand span { font-size: 11px; color: var(--mut); }
+.head .tools { margin-left: auto; flex: none; display: flex; gap: 6px; }
+/* 「退休」按钮：**一整条横条，住在 HUD 上面**（用户 2026-09-27）。
+   它原来是页头里一枚 `.ic`，与倍速挤在同一行 —— 那正是页头折行的主因，所以挪下来。
+   版式沿用旧版那条定格提示（`.frozen`）：1px accent 描边、上下 8px、通栏。
+   上下各 12px（自己 margin-top 12 + HUD 的 padding-top 12），落在 8/12 两档的节奏里。 */
+.retire {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.retire:active { background: var(--accent-soft); }
 
 .ic {
   background: none;
@@ -69,8 +102,9 @@ html, body {
   cursor: pointer;
 }
 .ic:active { background: var(--line); }
-/* 当前倍增档位 / 任何被选中的开关：描边与文字都换成主色 */
-.ic.on { border-color: var(--accent); color: var(--accent); }
+/* 当前倍增档位 / 任何被选中的开关：描边 + 文字 + **淡底**都换成主色。
+   只有描边与文字时，在深色底上仍然很难一眼看出哪一档是按下的（用户 2026-09-27 反馈）。 */
+.ic.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 /* ── HUD（跨页签常驻）── */
 .hud {
@@ -86,25 +120,25 @@ html, body {
   border: 1px solid var(--line);
   padding: 8px 12px;
 }
-.hud .cell i { display: block; font-style: normal; font-size: 11px; color: var(--mut); }
+/* 标签行：一格可以有两段（左标签 · 右速率）—— flex 让第二段贴住右边缘 */
+.hud .cell i { display: flex; justify-content: space-between; font-style: normal; font-size: 11px; color: var(--mut); }
+.hud .cell i em { font-style: normal; }
 .hud .cell b { display: block; font-size: 15px; font-weight: 600; word-break: break-all; }
 .hud .cell u { display: block; text-decoration: none; font-size: 11px; color: var(--mut); }
-/* 目标里的 ✓/· —— 与正文同字号但不抢词 */
-.hud .cell b em { font-style: normal; color: var(--mut); }
-.hud .cell b em.ok { color: var(--ok); }
+/* 目标达成：**不打钩**（用户 2026-09-27）—— 目标文字用方框高亮，标题行右端贴边写「完成」。
+   `b.done` 由块级退成 `inline-block`，方框才**贴着词**而不是拉满整格。 */
+.hud .cell i em.ok { color: var(--ok); }
+.hud .cell b.done { display: inline-block; border: 1px solid var(--ok); color: var(--ok); padding: 0 6px; }
 /* 一格装两栏（左净利率 · 右世界排名）：两个 half 并排，各自内部照旧 i/b/u 竖排 */
 .hud .cell .half { display: inline-block; vertical-align: top; width: 48%; }
 .hud .cell .half + .half { text-align: right; }
-
-/* ── 定格（登顶之后：时间冻结，只剩回看）── */
-.frozen {
-  margin-top: 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  font-size: 13px;
-  text-align: center;
-}
+/*
+ * ⚠️ 右半格的**标签行**必须单独贴右（用户 2026-09-27 截图：世界那一格的字停在格子中间）。
+ *    根因：`.cell i` 是 `display:flex; justify-content:space-between`，而里面的文本是
+ *    一个**裸文本节点**（flex 子项）—— `text-align: right` 对 flex 子项**无效**，
+ *    它只会停在 flex-start。`b` / `u` 是块级元素，所以受 `text-align` 管，只有这一行错位。
+ */
+.hud .cell .half + .half i { justify-content: flex-end; }
 
 /* ── 页签 ── */
 .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
@@ -118,13 +152,11 @@ html, body {
   font-size: 13px;
   cursor: pointer;
 }
-.tab.on { color: var(--accent); border-color: var(--accent); }
+.tab.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* 在手有大单 / 公司页有待决：页签亮起来（与倍速的 .on 同一套视觉，不切页也该看见） */
+.tab.hot { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
-/* ── 自动购买方向（公司页最上面一行）── */
-.focus { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-.focus .fk { font-size: 11px; color: var(--mut); }
-
-/* ── 三条投资线 ── */
+/* ── 投资线（公司页两条资产 / 创始人页三条）── */
 .lines { display: grid; gap: 8px; margin-bottom: 12px; }
 .line {
   display: grid;
@@ -135,7 +167,8 @@ html, body {
   border: 1px solid var(--line);
   padding: 8px 12px;
 }
-.line .btn {
+.line .btn,
+.order .btn {
   background: var(--accent);
   border: 0;
   color: #07201c;
@@ -148,10 +181,57 @@ html, body {
 .line .btn em { font-style: normal; font-weight: 400; opacity: .6; font-size: 11px; margin-left: 5px; }
 .line .btn.dim { background: var(--line); color: var(--mut); }
 .line .btn:disabled,
+.order .btn:disabled,
 .opt:disabled,
 .ic:disabled { opacity: .45; cursor: default; }
 .line .val { font-size: 13px; }
 .line .cost { font-size: 12px; color: var(--mut); }
+
+/* ── 订单页 ── */
+.orders {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.orders .o-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--mut);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.orders .o-head b { font-size: 14px; color: var(--fg); }
+.orders .o-empty { font-size: 12px; color: var(--mut); padding-top: 4px; }
+/*
+ * 一条单**占两行**（用户 2026-09-27）：
+ *   第一行 = 甲方真名 + 报酬；第二行 = 交付内容 · 剩余月数 + 交付按钮。
+ * 走两行的原因：`上海汽车集团股份有限公司 · 集团数据中台迁移 · 剩余 11 个月` 这串在手机上
+ * 必然折行，而**折在哪儿由字数决定** ⇒ 每条单的版式都不一样。固定两行之后，
+ * 甲方永远对齐在第一行、按钮永远对齐在第二行右端。
+ * 每条单之间加分割线（`.order + .order`）—— 现在一条单是两行，光靠留白分不开。
+ */
+.order {
+  display: block;
+  padding: 8px 0;
+  font-size: 13px;
+}
+.order + .order { border-top: 1px solid var(--line); }
+.order.hot { color: var(--accent); }
+.order .o-nm { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.order .o-nm .onm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.order .oamt { flex: none; font-variant-numeric: tabular-nums; }
+.order .o-act { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; }
+.order .o-act .owk {
+  font-size: 12px;
+  color: var(--mut);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.order .o-act .btn { flex: none; }
 
 /* ── 待决事件（在线不弹窗，就长在主界面里）── */
 .pending {
@@ -210,7 +290,30 @@ html, body {
 .rank .row .dlt .down { color: var(--bad); font-style: normal; }
 .rank .row .dlt .new { color: var(--gold); font-style: normal; }
 .rank .row .cap { text-align: right; font-variant-numeric: tabular-nums; }
-.rank .row.me { color: var(--accent); font-weight: 600; }
+/*
+ * 玩家自己那一行（用户 2026-09-27：「还是看的不太清晰，可以高亮加点特效、加个框框」）：
+ * 只换颜色 + 加粗是不够的 —— 整张榜都是绿压绿，一眼扫过去找不到自己。所以：
+ *   · 淡底 + 主色描边（**框框**），并且用负 margin 让框顶到卡片内边距上，行高不跳；
+ *   · 一道 2.6 秒的呼吸阴影（**特效**），在 20 行里它是唯一会动的东西；
+ *   · 底色用 `--accent-soft`（八位十六进制），所以换章换色时这一行的底色跟着一起变。
+ */
+.rank .row.me {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  padding: 3px 6px;
+  margin: 2px -6px;
+  animation: mePulse 2.6s ease-in-out infinite;
+}
+@keyframes mePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+  50% { box-shadow: 0 0 14px -4px var(--accent); }
+}
+/* 系统开了「减少动态效果」就只留下框与底色 —— 呼吸感不该是强制的 */
+@media (prefers-reduced-motion: reduce) {
+  .rank .row.me { animation: none; }
+}
 .rank .sep { text-align: center; color: var(--mut); font-size: 11px; padding: 2px 0; }
 
 /* ── 流水（固定底栏，内部滚动 —— 与旧版一致）── */
@@ -233,6 +336,21 @@ html, body {
 }
 .log .li { padding: 2px 0; border-bottom: 1px solid rgba(255, 255, 255, .03); }
 .log .li:last-child { border-bottom: 0; }
+/*
+ * 日志分类着色（用户 2026-09-27：不同条目用不同颜色，方便区分）。
+ * 类别由行首那个 `【标签】` 决定 —— 判据与标签表都在 `render.js` 的 `logClass()`，
+ * 这里只负责色相。底色是 `--mut` 的灰，下面每一档只换色相、饱和度都收着，
+ * 免得底栏变成一棵圣诞树（LESS IS MORE）。
+ */
+.log .li.ord { color: var(--ok); }          /* 订单    —— 钱进来了 */
+.log .li.dec { color: #6fa8dc; }            /* 年度决策 */
+.log .li.fin { color: var(--gold); }        /* 融资 / 改名 */
+.log .li.mile { color: #b48cd9; }           /* 叙事里程碑 */
+.log .li.act { color: #8fa3b8; }            /* 推幕    —— 灰蓝，比底色亮一档 */
+.log .li.world { color: #6ad1c0; }          /* 名次播报 —— 与 --accent 同族的青 */
+.log .li.cyc { color: #d98c5f; }            /* 大盘 / 轮动 / 黑天鹅 —— 名次变化的「原因」 */
+.log .li.top { color: var(--fg); font-weight: 600; }   /* 登顶 —— 压到正文色并加粗 */
+.log .li.yr { color: #6b7784; }             /* 年度报告 —— 比底色更暗，当分隔用 */
 
 /* ── 弹窗层 ── */
 #overlay:empty { display: none; }

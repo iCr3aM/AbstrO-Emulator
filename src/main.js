@@ -9,7 +9,8 @@
 
 import { createState } from './core/state.js';
 import { save, load, applyOffline, wipe, disableSave } from './core/save.js';
-import { createLoop, tick, resolvePending, manualBuy, setFocus } from './core/engine.js';
+import { createLoop, tick, resolvePending, manualBuy } from './core/engine.js';
+import { deliverOrder } from './core/orders.js';
 import { rates } from './core/economy.js';
 import { evaluateRetirement } from './core/endings.js';
 import {
@@ -17,6 +18,7 @@ import {
   armDeleteSave, deleteSaveArmed, disarmDeleteSave,
 } from './ui/render.js';
 import { bindActions } from './ui/bind.js';
+import { play } from './ui/audio.js';
 
 const root = document.getElementById('app');
 const overlay = document.getElementById('overlay') || root;
@@ -72,28 +74,46 @@ try { tick(s, 0); } catch (err) { fatal('初始化', err); }
 
 const handlers = {
   /** 手动点击 = 立即买下你点的那一条（与自动购买同一个函数，一次两级） */
-  buy(id) { if (manualBuy(s, id)) draw(); },
+  buy(id) { if (manualBuy(s, id)) { play('buy', s.sfx); draw(); } },
+
+  /** 交付一条订单（准时 ×1.0；到期未点由引擎按 ×0.9 自动交付） */
+  order(uid) { if (deliverOrder(s, Number(uid), rates(s))) { play('order', s.sfx); save(s); draw(); } },
 
   /** 结算一条待决事件 */
   opt(arg) {
     const [uid, i] = String(arg).split(':');
-    if (resolvePending(s, Number(uid), Number(i), rates(s))) { save(s); draw(); }
+    if (resolvePending(s, Number(uid), Number(i), rates(s))) { play('opt', s.sfx); save(s); draw(); }
   },
 
   close() { draw(); },
-  settings() { renderSettings(overlay, s); },
-  speed(v) { s.speed = Number(v) || 1; draw(); },
-  tab(i) { setTab(i); draw(); },
 
-  /** 自动购买的方向：只改一个字段，`nextLine` 下一 tick 就照它走 */
-  focus(id) { if (setFocus(s, id)) { save(s); draw(); } },
-
-  /** 退休：登顶 ⇒ 唯一结局；未登顶 ⇒ 只提示，游戏继续 */
+  /**
+   * 退休（HUD 上面那条通栏横条）：登顶 ⇒ 唯一结局；未登顶 ⇒ 只提示，游戏继续。
+   * ⚠️ 结局本身是**自动触发**的（`engine.tick` 里 `worldRank === 1`），这个按钮是手动入口 ——
+   *    它不做判定之外的任何事，判定也只有 `evaluateRetirement()` 一处。
+   */
   retire() {
     const r = evaluateRetirement(s);
+    play('ui', s.sfx);
     save(s);
     if (r.ending) renderEnding(overlay, s);
     else renderNotTop(overlay, r.rank);
+  },
+
+  settings() { play('ui', s.sfx); renderSettings(overlay, s); },
+  speed(v) { play('ui', s.sfx); s.speed = Number(v) || 1; draw(); },
+  tab(i) { play('ui', s.sfx); setTab(i); draw(); },
+
+  /**
+   * 音效开关（⚙ 里那个按钮）。
+   * ⚠️ **不许关弹窗**（用户 2026-09-26）—— 点完要看得见「音效：开 ↔ 关」的变化，所以只重画弹窗。
+   * 打开时立刻响一声，等于给玩家一个「确实开了」的回执。
+   */
+  audio() {
+    s.sfx = s.sfx === false;
+    save(s);
+    renderSettings(overlay, s);
+    play('ui', s.sfx);
   },
 
   /**
@@ -116,11 +136,18 @@ const handlers = {
 
 let deleteReset = 0;
 let endingShown = false;
+/** 上一帧的章号 —— 推幕那一声「叮」靠它比对（`engine` 里没有 UI 可挂的钩子，在这里比最省） */
+let lastStage = s.stage;
 
 function draw() {
   render(root, s);
+  if (s.stage !== lastStage) {
+    lastStage = s.stage;
+    play('stage', s.sfx);
+  }
   if (s.ending === 'top' && !endingShown) {
     endingShown = true;
+    play('top', s.sfx);
     save(s);
     renderEnding(overlay, s);
   }
@@ -137,12 +164,13 @@ function draw() {
 function dispatch(el) {
   const d = el.dataset;
   if (d.buy !== undefined) return handlers.buy(d.buy);
+  if (d.order !== undefined) return handlers.order(d.order);
   if (d.opt !== undefined) return handlers.opt(d.opt);
   if (d.speed !== undefined) return handlers.speed(d.speed);
   if (d.tab !== undefined) return handlers.tab(d.tab);
-  if (d.focus !== undefined) return handlers.focus(d.focus);
-  if (d.settings !== undefined) return handlers.settings();
   if (d.retire !== undefined) return handlers.retire();
+  if (d.settings !== undefined) return handlers.settings();
+  if (d.audio !== undefined) return handlers.audio();
   if (d.delete !== undefined) return handlers.delete();
   if (d.close !== undefined) { closeModal(overlay); return handlers.close(); }
 }

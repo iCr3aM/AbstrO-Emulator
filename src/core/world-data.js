@@ -141,55 +141,99 @@ export const ALPHA = {
  * 未来入场公司 —— 今天**未上市**但有公开估值/IPO 计划的真实公司。
  * y = 预计入场（上市/纳入榜）年份，c = 入场时市值（万亿 USD）
  *
- * 事实来源（2026-09-24 搜索）：
- *   Anthropic   9650 亿私募估值，IPO 目标 ~2 万亿（史上最大 IPO），原定 2026-11
- *   OpenAI      8520 亿私募估值，2026-09 宣布暂缓 IPO
- *   字节跳动    6000 亿美元非公开市场估值
- *   DeepSeek    1500 亿（中国独角兽榜第二）
- *   Stripe 1590 亿 / Databricks 1340 亿 / Anduril 610 亿 / Revolut 750 亿（胡润全球独角兽榜）
- *   Altos Labs  贝索斯投资的长寿生物，细胞重编程——暂无 IPO 计划，属合理预测
+ * 事实来源（2026-09 搜索；估值取自各公司最新一轮融资报道 / 胡润《2025 全球独角兽榜》，
+ * 均已换算成万亿 USD）：
+ *   Anthropic   9650 亿私募估值 → c 0.96（IPO 目标曾传 ~2 万亿，史上最大 IPO）
+ *   OpenAI      8520 亿私募估值 → c 0.85（2026-09 宣布暂缓 IPO）
+ *   字节跳动    4800 亿美元非公开市场估值 → c 0.48
+ *   荣耀        1800 亿（已辅导备案）→ c 0.18
+ *   小红书      500 亿（2025 底老股转让）→ c 0.05 ｜ 大疆 ~370 亿 → c 0.037
+ *   Stripe 1590 亿 / Databricks 1340 亿 / Anduril 610 亿 / Revolut 750 亿 /
+ *     Mistral AI 240 亿（2026-09 €21B D 轮）/ DeepSeek 500 亿（胡润独角兽榜）
+ *   其余为一级市场已知估值的中小公司：Scale AI、Perplexity、Anysphere/Cursor、
+ *     Flipkart、Checkout.com、Blue Origin、TerraPower、Isomorphic Labs、
+ *     昆仑芯、G42、Rapidus、Helsing、Plaid、Sierra Space 等。
+ *
+ * ⚠️ 只保证「公司今天真实存在、估值有公开来源」；`y`（入场年份）与 `c`（入场市值）
+ *    均为**预测**，不是既成事实。入场时都远小于榜首（2066 年英伟达 ≈ $24T），
+ *    不会有人一进来就当上新的世界第一。
  */
 export const IPO_POOL = [
-  { n: 'Anthropic', t: 'ANT', y: 2027, c: 1.60, s: 'cloud', co: '美国' },
+  { n: 'Anthropic', t: 'ANT', y: 2027, c: 0.96, s: 'cloud', co: '美国' },
   { n: 'Stripe', t: 'STRP', y: 2028, c: 0.25, s: 'finance', co: '美国' },
   { n: 'Databricks', t: 'DTBR', y: 2028, c: 0.22, s: 'cloud', co: '美国' },
   { n: 'Revolut', t: 'RVOL', y: 2028, c: 0.10, s: 'finance', co: '英国' },
   { n: 'Binance', t: 'BNB', y: 2028, c: 0.09, s: 'finance', co: '全球' },
-  { n: 'OpenAI', t: 'OAI', y: 2029, c: 1.20, s: 'cloud', co: '美国' },
+  { n: '昆仑芯', t: 'KLX', y: 2028, c: 0.08, s: 'ai', co: '中国' },
+  { n: 'OpenAI', t: 'OAI', y: 2029, c: 0.85, s: 'cloud', co: '美国' },
+  { n: '大疆', t: 'DJI', y: 2029, c: 0.037, s: 'industry', co: '中国' },
   { n: 'Anduril', t: 'ANDL', y: 2029, c: 0.12, s: 'industry', co: '美国' },
-  { n: '希音', t: 'SHEIN', y: 2029, c: 0.09, s: 'consumer', co: '中国' },
-  { n: '大疆', t: 'DJI', y: 2029, c: 0.08, s: 'industry', co: '中国' },
   { n: 'Mistral AI', t: 'MSTR', y: 2029, c: 0.11, s: 'cloud', co: '法国' },
-  { n: '字节跳动', t: 'BD', y: 2030, c: 0.90, s: 'consumer', co: '中国' },
+  { n: 'Anysphere', t: 'CURS', y: 2029, c: 0.09, s: 'ai', co: '美国' },
+  { n: 'Flipkart', t: 'FLPK', y: 2029, c: 0.09, s: 'consumer', co: '印度' },
+  { n: 'Checkout.com', t: 'CHKT', y: 2029, c: 0.06, s: 'finance', co: '英国' },
+  { n: '小红书', t: 'RED', y: 2030, c: 0.05, s: 'consumer', co: '中国' },
+  { n: '字节跳动', t: 'BD', y: 2030, c: 0.48, s: 'consumer', co: '中国' },
+  { n: '荣耀', t: 'HONOR', y: 2030, c: 0.18, s: 'consumer', co: '中国' },
   { n: '蚂蚁集团', t: 'ANTG', y: 2030, c: 0.12, s: 'finance', co: '中国' },
-  { n: '荣耀', t: 'HONOR', y: 2030, c: 0.10, s: 'consumer', co: '中国' },
+  { n: 'Blue Origin', t: 'BLUE', y: 2030, c: 0.12, s: 'space', co: '美国' },
+  { n: 'Scale AI', t: 'SCLR', y: 2030, c: 0.06, s: 'ai', co: '美国' },
+  { n: 'Perplexity', t: 'PPLX', y: 2030, c: 0.06, s: 'cloud', co: '美国' },
+  { n: 'PhonePe', t: 'PHNP', y: 2030, c: 0.06, s: 'finance', co: '印度' },
+  { n: 'Trade Republic', t: 'TRDR', y: 2030, c: 0.05, s: 'finance', co: '德国' },
   { n: 'DeepSeek', t: 'DS', y: 2031, c: 0.35, s: 'cloud', co: '中国' },
+  { n: 'Sierra Space', t: 'SRRA', y: 2031, c: 0.06, s: 'space', co: '美国' },
+  { n: 'Helsing', t: 'HSLG', y: 2031, c: 0.06, s: 'industry', co: '德国' },
+  { n: 'Redwood Materials', t: 'RDWD', y: 2031, c: 0.05, s: 'energy', co: '美国' },
+  { n: 'Plaid', t: 'PLAI', y: 2031, c: 0.05, s: 'finance', co: '美国' },
+  { n: 'G42', t: 'G42', y: 2032, c: 0.07, s: 'ai', co: '阿联酋' },
+  { n: '阶跃星辰', t: 'STEP', y: 2032, c: 0.06, s: 'cloud', co: '中国' },
+  { n: 'Skild AI', t: 'SKLD', y: 2032, c: 0.05, s: 'space', co: '美国' },
+  { n: 'Safe Superintelligence', t: 'SSI', y: 2033, c: 0.07, s: 'cloud', co: '美国' },
+  { n: 'Rapidus', t: 'RPDS', y: 2033, c: 0.05, s: 'ai', co: '日本' },
   { n: 'Figure AI', t: 'FIGR', y: 2034, c: 0.20, s: 'space', co: '美国' },
-  { n: 'Altos Labs', t: 'ALTOS', y: 2036, c: 0.40, s: 'health', co: '美国' },
+  { n: 'Axiom Space', t: 'AXOM', y: 2035, c: 0.05, s: 'space', co: '美国' },
+  { n: 'Altos Labs', t: 'ALTOS', y: 2036, c: 0.35, s: 'health', co: '美国' },
   { n: '联邦聚变', t: 'CFS', y: 2038, c: 0.15, s: 'energy', co: '美国' },
+  { n: 'Isomorphic Labs', t: 'ISOM', y: 2039, c: 0.06, s: 'health', co: '英国' },
+  { n: 'TerraPower', t: 'TRPW', y: 2040, c: 0.06, s: 'energy', co: '美国' },
+  { n: 'Physical Intelligence', t: 'PHYI', y: 2040, c: 0.05, s: 'space', co: '美国' },
+  { n: 'NEURA Robotics', t: 'NEUR', y: 2042, c: 0.04, s: 'space', co: '德国' },
 ];
 
 /**
  * 黑马池 —— 每**局**随机抽一部分入场（`world.js` 用世界种子哈希决定）。
  *
- * 为什么抽而不是全放：榜单需要「有些公司你上一周目没见过」。固定 17 家必然入场 +
- * 随机 4-6 家黑马，既守住真实感（大票一定有），又给每个存档不同的世界。
+ * 为什么抽而不是全放：榜单需要「有些公司你上一周目没见过」。IPO_POOL 的 40 家必然入场 +
+ * 随机若干家黑马，既守住真实感（大票一定有），又给每个存档不同的世界。
  * ⚠️ 随机取自 `(世界种子, 序号)` 的哈希，**不消耗玩家随机数** —— 所以既确定可复现，
  *    又不会干扰事件/竞标的随机序列（矩阵种子不会被带偏）。
  *
- * 全部是**今天真实存在**的公司（2026-09 搜索），上市年份属合理预测。
+ * 全部是**今天真实存在**的公司（2026-09 搜索，估值有公开来源），上市年份属合理预测。
  */
 export const DARK_HORSES = [
   { n: '月之暗面', t: 'MOON', y: 2030, c: 0.30, s: 'cloud', co: '中国' },
-  { n: 'MiniMax', t: 'MMAX', y: 2031, c: 0.25, s: 'cloud', co: '中国' },
   { n: 'Cerebras', t: 'CBRS', y: 2030, c: 0.28, s: 'ai', co: '美国' },
   { n: 'Groq', t: 'GROQ', y: 2030, c: 0.22, s: 'ai', co: '美国' },
+  { n: 'Zepto', t: 'ZEPT', y: 2030, c: 0.07, s: 'consumer', co: '印度' },
+  { n: 'Razorpay', t: 'RZPY', y: 2030, c: 0.06, s: 'finance', co: '印度' },
+  { n: '百川智能', t: 'BCAI', y: 2031, c: 0.10, s: 'cloud', co: '中国' },
+  { n: 'N26', t: 'N26', y: 2031, c: 0.05, s: 'finance', co: '德国' },
   { n: '星源智', t: 'XYAI', y: 2032, c: 0.08, s: 'space', co: '中国' },
+  { n: 'Relativity Space', t: 'RLTY', y: 2032, c: 0.08, s: 'space', co: '美国' },
+  { n: 'Mollie', t: 'MOLL', y: 2032, c: 0.05, s: 'finance', co: '荷兰' },
   { n: 'Thinking Machines', t: 'TML', y: 2033, c: 0.35, s: 'cloud', co: '美国' },
   { n: '1X 科技', t: 'ONEX', y: 2033, c: 0.12, s: 'space', co: '挪威' },
+  { n: 'PsiQuantum', t: 'PSIQ', y: 2033, c: 0.15, s: 'ai', co: '美国' },
+  { n: 'Snyk', t: 'SNYK', y: 2033, c: 0.05, s: 'cloud', co: '以色列' },
+  { n: 'Impulse Space', t: 'IMPL', y: 2034, c: 0.05, s: 'space', co: '美国' },
+  { n: 'Sakana AI', t: 'SKNA', y: 2034, c: 0.04, s: 'cloud', co: '日本' },
   { n: 'Neuralink', t: 'NLNK', y: 2035, c: 0.18, s: 'health', co: '美国' },
   { n: 'Insitro', t: 'INST', y: 2036, c: 0.10, s: 'health', co: '美国' },
-  { n: 'PsiQuantum', t: 'PSIQ', y: 2037, c: 0.15, s: 'ai', co: '美国' },
+  { n: 'Rebellions', t: 'RBLN', y: 2036, c: 0.05, s: 'ai', co: '韩国' },
   { n: 'Helion Energy', t: 'HLON', y: 2038, c: 0.20, s: 'energy', co: '美国' },
-  { n: '未知的 AGI 公司', t: '?', y: 2044, c: 0.30, s: 'space', co: '未知' },
+  { n: 'Shield AI', t: 'SHDI', y: 2040, c: 0.06, s: 'industry', co: '美国' },
+  { n: 'Form Energy', t: 'FORM', y: 2041, c: 0.06, s: 'energy', co: '美国' },
+  { n: 'NewLimit', t: 'NWLM', y: 2043, c: 0.06, s: 'health', co: '美国' },
+  { n: '逐际动力', t: 'LIMX', y: 2045, c: 0.05, s: 'space', co: '中国' },
 ];

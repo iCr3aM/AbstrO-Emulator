@@ -17,16 +17,25 @@
 
 import { installDom, makeNode, buttonsIn, findBtn } from './dom-stub.mjs';
 import { createState } from '../src/core/state.js';
-import { rates, derived, lowestLine, costFor, lineLevel, peOf } from '../src/core/economy.js';
-import { tick, pendingEvent, resolvePending, manualBuy, setFocus } from '../src/core/engine.js';
-import { CURVE_RATIO, MANUAL_GAIN } from '../src/core/content.js';
+import { rates, lowestLine, costFor, lineLevel, peOf, canAffordManual } from '../src/core/economy.js';
+import { tick, pendingEvent, resolvePending, manualBuy } from '../src/core/engine.js';
+import { deliverOrder } from '../src/core/orders.js';
+import { CURVE_RATIO, MANUAL_GAIN, MANUAL_PAY, RESERVE_FRAC, LINES } from '../src/core/content.js';
+import { evaluateRetirement } from '../src/core/endings.js';
 import {
-  render, renderEnding, renderOffline, renderSettings, closeModal, setTab,
+  render, renderEnding, renderNotTop, renderOffline, renderSettings, closeModal, setTab,
   armDeleteSave, deleteSaveArmed, disarmDeleteSave,
 } from '../src/ui/render.js';
 import { bindActions, ACTION_KEYS, PRIMARY_EVENT } from '../src/ui/bind.js';
 
 installDom();
+
+/**
+ * 每条投资线住在第几个页签（与 `render.js` 的 `PAGE_LINES = [['r','m','h'], ['c','d']]` 对齐）。
+ * 回放里「找按钮」必须先切到正确的页 —— 否则会以为按钮不存在。
+ * ⚠️ 页签序 = **创始人(0) / 公司(1) / 订单(2) / 市值榜(3)**；2026-09-27 调换过前两个。
+ */
+const PAGE_OF = { r: 0, m: 0, h: 0, c: 1, d: 1 };
 
 const app = makeNode('div');
 const overlay = makeNode('div');
@@ -81,11 +90,18 @@ const handlers = {
     if (resolvePending(s, Number(uid), Number(i), rates(s))) draw();
   },
   close() { draw(); },
+  /** 退休：登顶 ⇒ 结局弹窗；未登顶 ⇒ 「还差一点」（与 main.js 同源，判定只此一处） */
+  retire() {
+    const r = evaluateRetirement(s);
+    if (r.ending) renderEnding(overlay, s);
+    else renderNotTop(overlay, r.rank);
+  },
+  order(uid) { if (deliverOrder(s, Number(uid), rates(s))) draw(); },
   settings() { renderSettings(overlay, s); },
   speed(v) { s.speed = Number(v) || 1; draw(); },
   tab(i) { setTab(i); draw(); },
-  focus(id) { if (setFocus(s, id)) draw(); },
-  retire() { /* 结局弹窗由 draw() 负责，这里只记一笔 */ retires += 1; },
+  /** 音效开关：主件里会顺手放一声「叮」，这里只切状态（无头环境没有 AudioContext） */
+  audio() { s.sfx = s.sfx === false; renderSettings(overlay, s); },
   delete() {
     // 两步确认：与 main.js 同源 —— 用 render.js 的武装态，而不是本地另立一份
     if (!deleteSaveArmed()) { armDeleteSave(); renderSettings(overlay, s); return; }
@@ -94,17 +110,17 @@ const handlers = {
     realWipe();
   },
 };
-let retires = 0;
 
 function dispatch(el) {
   const d = el.dataset;
   if (d.buy !== undefined) return handlers.buy(d.buy);
+  if (d.order !== undefined) return handlers.order(d.order);
   if (d.opt !== undefined) return handlers.opt(d.opt);
   if (d.speed !== undefined) return handlers.speed(d.speed);
   if (d.tab !== undefined) return handlers.tab(d.tab);
-  if (d.focus !== undefined) return handlers.focus(d.focus);
   if (d.settings !== undefined) return handlers.settings();
   if (d.retire !== undefined) return handlers.retire();
+  if (d.audio !== undefined) return handlers.audio();
   if (d.delete !== undefined) return handlers.delete();
   // 关闭与 main.js 同源：调 render.js 的 closeModal（它负责**把 overlay 清空**）
   if (d.close !== undefined) { closeModal(overlay); return handlers.close(); }
@@ -124,7 +140,8 @@ const check = (name, ok, note = '') => { rows.push({ name, ok: !!ok, note }); re
 function logCapDelta(eff, R) {
   if (!eff) return 0;
   let d = 0;
-  if (eff.cash) d += ((eff.cash * R.revenue) / costFor(s, 'r')) * Math.log(CURVE_RATIO) / 3;
+  // 一笔现金能买几级 × 每级的对数市值增量（ln g = ln r / 线数）
+  if (eff.cash) d += ((eff.cash * R.revenue) / costFor(s, 'r')) * Math.log(CURVE_RATIO) / LINES.length;
   for (const k of ['prod', 'share', 'team']) if (eff[k]) d += Math.log(eff[k]);
   if (eff.pe) d += Math.log(Math.max(1e-9, (peOf(s) + eff.pe) / peOf(s)));
   return d;
@@ -145,6 +162,7 @@ function clickFirst(html, box, key, modal = null) {
 let sawOpt = 0;
 let sawBuy = 0;
 let sawSpeed = 0;
+let sawHot = 0;
 const seenKeys = new Set();
 
 // ── ① 主界面按钮审计：渲染出来的每个 data-* 动作键都必须在 ACTION_KEYS 里 ──
@@ -158,9 +176,13 @@ const seenKeys = new Set();
     }
   }
   check('主界面渲染出的动作键全部落在 ACTION_KEYS 内', stray.length === 0, stray.join('、'));
-  check('主界面存在三条投资线按钮（data-buy）', btns.filter(b => b.data.buy !== undefined).length === 3,
+  check('开局停在「创始人」页：三条经营线按钮（data-buy）', btns.filter(b => b.data.buy !== undefined).length === 3,
     `实际 ${btns.filter(b => b.data.buy !== undefined).length} 个`);
   check('主界面存在倍速按钮（data-speed）', btns.some(b => b.data.speed !== undefined));
+  // 「退休」横条**只在登顶之后出现**（用户 2026-09-27 明确两次）。开局这一帧就得守住 ——
+  // 否则它会悄悄变回一颗常驻按钮（那正是被否决过两次的做法）。
+  check('开局（未登顶）没有「退休」按钮 —— 它只在登顶后出现',
+    !app.innerHTML.includes('data-retire'));
 }
 
 // ── ①b 页签：切页真的换内容，而且这个态住在模块里（全量重建不会丢）──
@@ -172,38 +194,37 @@ const seenKeys = new Set();
     appBox.fire(PRIMARY_EVENT, ev({ target: clickable(btn) }));
     return true;
   };
-  check('主界面给了两个页签（公司 / 市值榜）',
-    buttonsIn(app.innerHTML).filter(b => b.data.tab !== undefined).length === 2);
-  check('开局停在「公司」页：有投资线、没有榜单',
+  check('主界面给了四个页签（创始人 / 公司 / 订单 / 市值榜）',
+    buttonsIn(app.innerHTML).filter(b => b.data.tab !== undefined).length === 4);
+  check('开局停在「创始人」页：有投资线、没有榜单',
     buttonsIn(app.innerHTML).some(b => b.data.buy !== undefined) && !app.innerHTML.includes('世界市值榜'));
 
-  check('点「市值榜」切得动', clickTab(1));
+  check('点「市值榜」切得动', clickTab(3));
   check('切到「市值榜」：榜单出现、投资线让位',
     app.innerHTML.includes('世界市值榜') && !buttonsIn(app.innerHTML).some(b => b.data.buy !== undefined));
   check('未上市时榜单里没有玩家行（未上市不进榜）', !app.innerHTML.includes('class="row me"'));
 
-  draw();   // 整页重建一次 —— 页签状态若留在 DOM 上，这一下就会弹回「公司」
+  draw();   // 整页重建一次 —— 页签状态若留在 DOM 上，这一下就会弹回「创始人」
   check('页签状态住在模块里：重建一帧后仍停在「市值榜」', app.innerHTML.includes('世界市值榜'));
 
-  check('切回「公司」恢复投资线',
-    clickTab(0) && buttonsIn(app.innerHTML).some(b => b.data.buy !== undefined));
+  check('切回「公司」页挂出两条资产线',
+    clickTab(1) && buttonsIn(app.innerHTML).filter(b => b.data.buy !== undefined).length === 2);
 }
 
-// ── ①c 自动购买方向（§1.6）：四个方向按钮 + 选中态跟着走 ──
+// ── ①c 订单页：交付按钮真的能点（data-order → deliverOrder）──
 {
-  const btns = buttonsIn(app.innerHTML).filter(b => b.data.focus !== undefined);
-  check('公司页给了四个自动方向按钮（均衡 + 三条线）', btns.length === 4, `实际 ${btns.length} 个`);
-  check('默认选中「均衡」（even）',
-    s.focus === 'even' && app.innerHTML.includes('data-focus="even"') && /class="ic on" data-focus="even"/.test(app.innerHTML));
-
-  const r = btns.find(b => b.data.focus === 'r');
-  appBox.fire(PRIMARY_EVENT, ev({ target: clickable(r) }));
-  check('点「投研发」真的改了方向，并且只亮它一个',
-    s.focus === 'r' && /class="ic on" data-focus="r"/.test(app.innerHTML) && !/class="ic on" data-focus="even"/.test(app.innerHTML),
-    `s.focus=${s.focus}`);
-  check('方向态住在模块里：整页重建一帧后仍是「投研发」',
-    (draw(), s.focus === 'r' && /class="ic on" data-focus="r"/.test(app.innerHTML)));
-  s.focus = 'even';    // 复位：后面的整局回放要按默认（均衡）跑
+  tick(s, 0);                                   // 建世界表 / 写进度钟 / 发第 0 月那条订单
+  check('「订单」页切得动',
+    buttonsIn(app.innerHTML).some(b => b.data.tab === '2') && (setTab(2), draw(), true));
+  const live = s.orders.live.length;
+  check('开局就有在手订单（排期第 0 月来一条）', live >= 1, `在手 ${live} 条`);
+  const moneyBefore = s.money;
+  const delivered = clickFirst(app.innerHTML, appBox, 'order');
+  check('点交付按钮真的拿到了订单钱（准时 ×1.0，且出队）',
+    !!delivered && s.money > moneyBefore && s.orders.live.length === live - 1,
+    `${live} → ${s.orders.live.length} 条 ｜ +${(s.money - moneyBefore).toFixed(0)}`);
+  setTab(0);
+  draw();
 }
 
 // ── ② 倍速按钮：真实接线走一遍 ──
@@ -223,17 +244,30 @@ const seenKeys = new Set();
 
 // ── ③ 手动点击买一条线（走 dispatch → handlers.buy → manualBuy）──
 {
-  s.money = costFor(s, 'r') * 3;
+  /**
+   * 现金与「可动用现金」的关系：可动用 = 现金 × (1 − 储备比例)（储备基数已改成**现金**）。
+   * 手动一次付 `MANUAL_PAY` 份原价的钱（≈1.57）⇒ 现金必须给到 `MANUAL_PAY / (1 − rf)`
+   * 以上；rf=0.80 下 4 份现金只能动 0.8 份（按钮会是灰的），这里改成 1.2 倍余量。
+   */
+  const money0 = costFor(s, 'r') * MANUAL_PAY / (1 - RESERVE_FRAC) * 1.2;
+  s.money = money0;
   const lvBefore = lineLevel(s, 'r');
-  const costBefore = costFor(s, 'r');
-  const hit = clickFirst(app.innerHTML, appBox, 'buy');
+  const payBefore = costFor(s, 'r') * MANUAL_PAY;
+  // r（投研发）在「创始人」页 —— 五条线分两页之后，必须切到对应页才找得到那个按钮
+  setTab(0);
+  draw();
+  const btn = buttonsIn(app.innerHTML).find(b => b.data.buy === 'r' && !b.disabled);
+  let hit = null;
+  if (btn) { appBox.fire(PRIMARY_EVENT, ev({ target: clickable(btn) })); hit = btn; }
   check(`点击投资线按钮真的买下了（等级 +${MANUAL_GAIN}）`,
     !!hit && lineLevel(s, 'r') === lvBefore + MANUAL_GAIN, `${lvBefore} → ${lineLevel(s, 'r')}`);
-  // ⚠️ 用相对容差：`3c − c` 与 `2c` 在 IEEE754 下可能差 1 ulp（c 不是 2 的幂）
-  check('手动只扣一级的钱（涨两级 ≠ 付两级的钱）',
-    !!hit && Math.abs(s.money - 2 * costBefore) <= costBefore * 1e-9,
-    `预期 ${2 * costBefore}，实得 ${s.money}`);
+  // ⚠️ 用相对容差：扣款口径与 costFor × MANUAL_PAY 在 IEEE754 下可能差 1 ulp
+  check(`手动按 ${MANUAL_PAY.toFixed(2)} 份原价扣款（买 2 级不付 2 级的钱）`,
+    !!hit && Math.abs(s.money - (money0 - payBefore)) <= payBefore * 1e-9,
+    `预期 ${money0 - payBefore}，实得 ${s.money}`);
   if (hit) sawBuy += 1;
+  setTab(0);
+  draw();
 }
 
 // ── ④ 设置弹窗 + 两步删档 ──
@@ -284,9 +318,15 @@ while (!s.ending && steps < MAX_STEPS) {
   if (!due) continue;
   lastRenderAt = steps;
   renders += 1;
+  // ⚠️ 先定位该画哪一页：待决卡片只长在「公司」页（页签下标 1）；投资线分两页，
+  //    `lowestLine` 可能落在「创始人」页。以前只有一条页签链、整页只有一份内容，
+  //    所以这里不需要切页；现在不切就等于找不到按钮。
+  setTab(evPending ? 1 : (PAGE_OF[lowestLine(s)] || 0));
   draw();
 
   if (evPending) {
+    // 有待决 ⇒ 「公司」页签必须亮 `.hot`（玩家没切过去时，这是唯一的提醒信号）
+    if (/<button class="tab[^"]* hot" data-tab="1">/.test(app.innerHTML)) sawHot += 1;
     const btns = buttonsIn(app.innerHTML);
     for (const b of btns) for (const k of Object.keys(b.data)) seenKeys.add(k);
     const opts = btns.filter(b => b.data.opt !== undefined);
@@ -306,7 +346,11 @@ while (!s.ending && steps < MAX_STEPS) {
     // 手动点击 = 从界面里找「等级最低」那条线的按钮（与自动购买同一个解）
     const want = lowestLine(s);
     const btn = buttonsIn(app.innerHTML).find(b => b.data.buy === want && !b.disabled);
-    if (btn && s.money >= costFor(s, want)) {
+    // 门槛是「可动用现金（现金 × (1 − 储备比例)）≥ cost × MANUAL_PAY」——
+    // 与 autoBuy / manualBuy 同一条闸门。
+    // ⚠️ 用 `canAffordManual`（与按钮亮度同源），不要自己写 `>=`：边界上浮点会差几个 ulp，
+    //    自写比较会比按钮更严 —— 那就模拟成了「按钮亮着却不点」，量尺就不是线上那套了。
+    if (btn && canAffordManual(s, want)) {
       appBox.fire(PRIMARY_EVENT, ev({ target: clickable(btn) }));
       sawBuy += 1;
     }
@@ -315,6 +359,7 @@ while (!s.ending && steps < MAX_STEPS) {
 draw();
 
 check('从渲染出的 HTML 里真的点到过待决选项（不是空转）', sawOpt >= 20, `${sawOpt} 次`);
+check('有待决时「公司」页签亮 .hot（不切过去也看得见）', sawHot >= 20, `${sawHot}/${sawOpt} 次`);
 check('从渲染出的 HTML 里真的点到过投资线按钮（不是空转）', sawBuy >= 1, `${sawBuy} 次`);
 check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.ending ?? 'null'}`);
 
@@ -324,14 +369,16 @@ check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.en
   const elapsed = s.elapsed;
   const stage = s.stage;
   const lv = lineLevel(s, 'r');
+  setTab(1);                                     // 定格要看的「投资线按钮」在「公司」页（两条资产线）
   draw();
   const btns = buttonsIn(app.innerHTML);
   const buys = btns.filter(b => b.data.buy !== undefined);
   const speeds = btns.filter(b => b.data.speed !== undefined);
-  check('定格：主界面挂出「已登顶 · 时间冻结」', app.innerHTML.includes('已登顶 · 时间冻结'));
+  check('定格：旧版「已登顶 · 时间冻结」提示已经让位给「退休」横条',
+    !app.innerHTML.includes('已登顶 · 时间冻结') && btns.some(b => b.data.retire !== undefined));
   check('定格：投资线与倍速按钮全部 disabled（只剩回看）',
-    buys.length === 3 && speeds.length === 3 && [...buys, ...speeds].every(b => b.disabled),
-    `投资线 ${buys.filter(b => b.disabled).length}/3、倍速 ${speeds.filter(b => b.disabled).length}/3`);
+    buys.length === 2 && speeds.length === 3 && [...buys, ...speeds].every(b => b.disabled),
+    `投资线 ${buys.filter(b => b.disabled).length}/2、倍速 ${speeds.filter(b => b.disabled).length}/3`);
   // 真派发一次 pointerdown：disabled 的元素必须被 bind.js 直接跳过
   if (buys[0]) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(buys[0]) }));
   tick(s, 600);                                  // 10 分钟的等效时间：不许发生任何事
@@ -348,6 +395,24 @@ check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.en
     overlay.innerHTML === '', `innerHTML=${JSON.stringify(overlay.innerHTML.slice(0, 24))}`);
 }
 
+// ── ⑥b 「退休」横条：住在 HUD 上面（**不在页头**），点了能开结局 ──
+{
+  setTab(0);
+  draw();
+  const bar = buttonsIn(app.innerHTML).find(b => b.data.retire !== undefined);
+  const head = /<header class="head">[\s\S]*?<\/header>/.exec(app.innerHTML)?.[0] || '';
+  check('「退休」是 HUD 上面那条通栏横条，且**不住页头**',
+    !!bar && /<button class="retire" data-retire="1">退休<\/button>/.test(app.innerHTML)
+    && !/data-retire/.test(head));
+  check('旧版「已登顶 · 时间冻结」提示已经没了', !app.innerHTML.includes('已登顶 · 时间冻结'));
+  overlay.innerHTML = '';
+  if (bar) appBox.fire(PRIMARY_EVENT, ev({ target: clickable(bar) }));
+  check('登顶后点「退休」直接弹出结局',
+    s.worldRank === 1 && /class="modal"/.test(overlay.innerHTML) && overlay.innerHTML.includes('data-close'));
+  clickFirst(overlay.innerHTML, overlayBox, 'close');
+  check('关掉结局后 overlay 真正清空', overlay.innerHTML === '');
+}
+
 // ── ⑦ 离线报告弹窗 ──
 {
   renderOffline(overlay, { capped: 8 * 3600, cappedOut: true, equiv: 4320, report: { stageFrom: 1, stageTo: 2, cashGained: 1.23e6, overflowed: 2, pending: 1 } });
@@ -362,7 +427,7 @@ check('一路点到唯一结局「登顶」', s.ending === 'top', `ending=${s.en
 // ── ⑧ 派发路径审计 ──
 {
   check('主事件是 pointerdown（不是 click）', PRIMARY_EVENT === 'pointerdown', PRIMARY_EVENT);
-  const missing = ACTION_KEYS.filter(k => !['buy', 'opt', 'speed', 'tab', 'focus', 'settings', 'retire', 'delete', 'close'].includes(k));
+  const missing = ACTION_KEYS.filter(k => !['buy', 'order', 'opt', 'speed', 'tab', 'retire', 'settings', 'audio', 'delete', 'close'].includes(k));
   check('dispatch 覆盖了全部 ACTION_KEYS', missing.length === 0, missing.join('、'));
   check(`走完整局一共见到 ${seenKeys.size} 种动作键，没有越界的`, [...seenKeys].every(k => ACTION_KEYS.includes(k)),
     [...seenKeys].filter(k => !ACTION_KEYS.includes(k)).join('、'));

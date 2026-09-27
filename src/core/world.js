@@ -1,5 +1,5 @@
 /**
- * 世界市值模拟：100 家真实公司从 2026-09 起步，按月演化到 2061。
+ * 世界市值模拟：100 家真实公司从 2026-09 起步，按月演化到 2066。
  *
  * 设计原则：
  * 1. **完全确定性** —— 随机取自 (month, company, salt) 的哈希，**无状态**。
@@ -24,19 +24,44 @@ const WORLD_SEED = 20260924;
  * 三套增长假设（年化）。
  *   A 保守：符合「巨头几乎停涨」的推测（除太空/AI 新贵）
  *   B 中性：推荐 —— 遵守 GDP 天花板，AI 与太空仍是最大赢家
+ *     第 480 月（2066-08）榜首 ≈ **$26.04T**（实跑 `createWorld('B') + advanceWorld`；
+ *     2026-09-27 加了三层周期后从 $23.63T 抬上来，`npm run tune` 复核为幂等）。
+ *     这是「玩家终局市值」的上限锚点：
+ *     `ACTS[8].mcap` 由 `npm run tune` 钉在「第 480 月榜首」上，榜首一旦虚高，
+ *     终局线就跟着虚高，最后一章会在日历打满之前收尾（旧值 0.08 会给出 $245T，明显失真）。
  *   C 激进：全行业高增速，仅作对照（会导致巴菲特指标爆表，不推荐）
  */
 export const MODELS = {
   A: { ai: 0.020, cloud: 0.020, space: 0.080, consumer: 0.015, health: 0.020, finance: 0.015, energy: 0.010, industry: 0.012 },
-  B: { ai: 0.080, cloud: 0.060, space: 0.110, consumer: 0.050, health: 0.055, finance: 0.040, energy: 0.025, industry: 0.035 },
+  B: { ai: 0.022, cloud: 0.018, space: 0.030, consumer: 0.014, health: 0.018, finance: 0.012, energy: 0.010, industry: 0.013 },
   C: { ai: 0.120, cloud: 0.110, space: 0.130, consumer: 0.090, health: 0.090, finance: 0.080, energy: 0.060, industry: 0.070 },
 };
 
-const NOISE_SIGMA = 0.12;                              // 年化波动
+const NOISE_SIGMA = 0.14;                              // 年化波动
 const MONTH_SIGMA = NOISE_SIGMA / Math.sqrt(12);
 
-/** 32 位整数哈希 —— 确定性随机的地基 */
-function h32(a, b, c) {
+/**
+ * 周期层（2026-09-27）—— 让榜单「有呼吸」，不再是 100 条平滑向上的曲线。
+ * 三样东西都写在 `(月份, 公司, salt)` 上，**无状态**，所以同存档永远一致（探针可断言）。
+ *
+ *  1. **行业轮动** `SECTOR_PHASE` + `ROTATE_*`：每个行业一条 8 年正弦，相位错开，
+ *     接入**年化增速**（±2.4%）。于是「今年 AI 涨、明年能源涨」，名次会真的换位置。
+ *  2. **泡沫周期** `bubbleAt`：全市场一条 12 年正弦，直接乘在**市值水平**上（±12%）。
+ *     它不改变世界内部的相对名次（人人同乘），但**玩家的市值不在这个乘数里**
+ *     ⇒ 泡沫起来时玩家名次被压低、破裂时被抬高，这是玩家能感到的「大盘」。
+ *  3. **黑天鹅**（见 `eventFactor`）：个股每月 0.5% 概率 ±15~35%，比财报跳变大一个量级。
+ */
+const ROTATE_AMP = 0.024;
+const ROTATE_MONTHS = 96;
+const SECTOR_PHASE = { ai: 0, cloud: 0.7, space: 1.4, consumer: 2.1, health: 2.8, finance: 3.5, energy: 4.2, industry: 4.9 };
+
+const BUBBLE_AMP = 0.12;
+const BUBBLE_MONTHS = 144;
+/** 第 m 月末的估值水位乘数（`m = 0` 时恰好为 1，开局不偏） */
+const bubbleAt = m => 1 + BUBBLE_AMP * Math.sin((m / BUBBLE_MONTHS) * Math.PI * 2);
+
+/** 32 位整数哈希 —— 确定性随机的地基（`orders.js` 也拿它算交付单的甲方） */
+export function hash32(a, b, c) {
   let h = Math.imul(a | 0, 2654435761) ^ Math.imul(b | 0, 2246822519) ^ Math.imul(c | 0, 3266489917);
   h ^= h >>> 15; h = Math.imul(h, 2246822507);
   h ^= h >>> 13; h = Math.imul(h, 3266489913);
@@ -47,7 +72,7 @@ function h32(a, b, c) {
 /** 近似标准正态（三次均匀和）；clamp 到 ±3 防极端值 */
 function gauss(month, i, salt) {
   let s = 0;
-  for (let k = 0; k < 3; k++) s += h32(month, i * 7 + k, WORLD_SEED + salt * 131 + k) / 4294967296;
+  for (let k = 0; k < 3; k++) s += hash32(month, i * 7 + k, WORLD_SEED + salt * 131 + k) / 4294967296;
   const g = (s - 1.5) * 1.15;
   return Math.max(-3, Math.min(3, g));
 }
@@ -56,19 +81,31 @@ function gauss(month, i, salt) {
  * 月度事件乘数：
  *  - 财报跳变：每月 3% 概率，±4~8%
  *  - AI 周期回撤：约每 7 年（84 月）一次 −25%，随后 18 个月修复
+ *  - **黑天鹅**（2026-09-27）：每月 0.5% 概率，±15~35%。单次就吃掉/送来几年的涨幅，
+ *    让「谁在前面」这件事带上真的意外性 —— 也是榜单上唯一会一夜之间改名的机制。
  */
 function eventFactor(month, i) {
   let f = 1;
-  const r = h32(month, i, WORLD_SEED + 777) / 4294967296;
+  const r = hash32(month, i, WORLD_SEED + 777) / 4294967296;
   if (r < 0.03) {
-    const mag = 0.04 + (h32(month, i, WORLD_SEED + 778) / 4294967296) * 0.04;
+    const mag = 0.04 + (hash32(month, i, WORLD_SEED + 778) / 4294967296) * 0.04;
     f *= r < 0.015 ? 1 + mag : 1 - mag;
+  }
+  const q = hash32(month, i, WORLD_SEED + 779) / 4294967296;
+  if (q < 0.005) {
+    const mag = 0.15 + (hash32(month, i, WORLD_SEED + 780) / 4294967296) * 0.20;
+    f *= q < 0.0025 ? 1 + mag : 1 - mag;
   }
   const period = Math.floor(month / 84);
   const hit = period * 84 + (i % 18);
   if (month === hit) f *= 0.75;
   else if (month > hit && month <= hit + 18) f *= 1.016;
   return f;
+}
+
+/** 行业轮动：该行业当下的年化增速修正量（±`ROTATE_AMP`，相位按行业错开） */
+function sectorRotation(month, sector) {
+  return Math.sin((month / ROTATE_MONTHS) * Math.PI * 2 + (SECTOR_PHASE[sector] || 0)) * ROTATE_AMP;
 }
 
 /**
@@ -78,7 +115,7 @@ function eventFactor(month, i) {
  */
 export function createWorld(model = 'B', seed = WORLD_SEED) {
   const horses = DARK_HORSES
-    .filter((_, i) => h32(seed, i, 99991) / 4294967296 < 0.42)   // 期望抽中 ~5 家
+    .filter((_, i) => hash32(seed, i, 99991) / 4294967296 < 0.33)   // 期望抽中 ~8 家（池子 24 条）
     .map(h => ({ ...h }));
   return {
     model,
@@ -106,10 +143,12 @@ export function advanceWorld(w, months = 1) {
     }
     for (let i = 0; i < w.companies.length; i++) {
       const c = w.companies[i];
-      const growth = (mu[c.s] || 0.03) + (ALPHA[c.t] || 0);
+      const growth = (mu[c.s] || 0.03) + (ALPHA[c.t] || 0) + sectorRotation(w.month, c.s);
       const noise = gauss(w.month, i, 1) * MONTH_SIGMA;
       c.prev = c.cur;
-      c.cur = Math.max(1e-4, c.cur * (1 + growth / 12 + noise) * eventFactor(w.month, i));
+      // 泡沫乘的是**水位**，所以这一步用的是「本月末 / 上月末」两点的比值（等价于把正弦直接乘在市值上）
+      const bub = bubbleAt(w.month) / bubbleAt(w.month - 1);
+      c.cur = Math.max(1e-4, c.cur * (1 + growth / 12 + noise) * eventFactor(w.month, i) * bub);
     }
   }
   return w;
@@ -185,6 +224,75 @@ export const RMB_PER_T_USD = 7.2e12;
 export const toUSD_T = rmb => rmb / RMB_PER_T_USD;
 
 /**
+ * 三层周期 → 日志（用户 2026-09-27：「市值榜的周期要有日志或者事件显示」）
+ * ===============================================================
+ * 周期原本是**看不见的**：榜单名次在动，但玩家不知道那是行业轮动、是大盘水位、
+ * 还是某家公司自己出了事。这里把三种机制各自写成人话，让「名次变了」有可归因的原因。
+ *
+ * 为什么放在 core 而不是 render：它们是**世界的事实**，与玩家无关；而且必须**幂等** ——
+ * 同一段 `(from, to]` 不管跑几次都得出一模一样的几行。所以它只读 `(月份, 序号)` 上的
+ * 哈希与正弦，不带任何内部状态（与 `world.js` 的确定性铁律一致）。
+ *
+ * ⚠️ **只许在 `worldTick` 的「向前推进」分支调用**。回拉分支是「重建 + 推进到 target」，
+ *    在那里播报等于把整局的周期事件重播一遍。
+ *
+ * @param {number} from 推进前的月号（不含）
+ * @param {number} to   推进后的月号（含）
+ * @param {object} w    世界（已推进到 `to`）
+ * @returns {string[]}  该区间内发生的播报，按时间顺序
+ */
+export function cycleNotes(from, to, w) {
+  const out = [];
+  if (!w || !(to > from)) return out;
+  /**
+   * 当下的前 5 名 —— 按**序号**认公司（序号一旦入场就不再变）。
+   * 黑天鹅只报这五家：小公司的暴雷是噪声，巨头的暴雷才叫新闻。
+   */
+  const top = new Set(
+    w.companies.map((c, i) => [c.cur, i])
+      .sort((a, b) => b[0] - a[0]).slice(0, 5).map(x => x[1]),
+  );
+
+  for (let m = from + 1; m <= to; m++) {
+    // ① 泡沫周期（12 年一条正弦，乘在**水位**上）：第 36 月见顶、第 108 月见底，此后每 12 年一轮
+    if (m % BUBBLE_MONTHS === BUBBLE_MONTHS / 4) {
+      out.push('【大盘】估值水位见顶 —— 泡沫开始消退，榜单上的人都在等下一份财报。');
+    } else if (m % BUBBLE_MONTHS === (BUBBLE_MONTHS * 3) / 4) {
+      out.push('【大盘】估值水位见底 —— 钱又开始往科技股里涌。');
+    }
+
+    // ② 行业轮动（每个行业一条 8 年正弦，相位错开）：每 8 年报一次「当下最热的是谁」
+    if (m % ROTATE_MONTHS === 0) {
+      let best = null;
+      for (const k of Object.keys(SECTOR_PHASE)) {
+        const v = Math.sin((m / ROTATE_MONTHS) * Math.PI * 2 + SECTOR_PHASE[k]);
+        if (!best || v > best.v) best = { k, v };
+      }
+      out.push(`【轮动】资金转向${SECTOR_LABEL[best.k] || best.k}`
+        + ' —— 这个赛道的名字开始频繁出现在榜单前几行。');
+    }
+
+    // ③ AI 回撤：与 `eventFactor` 同一周期（每 7 年一轮，从巨头起逐月扫过整条赛道）
+    if (m % 84 === 0) {
+      out.push('【大盘】AI 板块进入回撤周期，从巨头开始，逐月扫过整条赛道。');
+    }
+
+    // ④ 黑天鹅（`eventFactor` 里那 0.5%）：每月最多一条，且只报前 5 名里的那一家
+    for (let i = 0; i < w.companies.length; i++) {
+      if (!top.has(i)) continue;
+      const q = hash32(m, i, WORLD_SEED + 779) / 4294967296;
+      if (q >= 0.005) continue;
+      const mag = 0.15 + (hash32(m, i, WORLD_SEED + 780) / 4294967296) * 0.20;
+      const up = q < 0.0025;
+      out.push(`【黑天鹅】${w.companies[i].n} 一夜之间${up ? '暴涨' : '重挫'} ${Math.round(mag * 100)}%`
+        + ` —— ${up ? '据说是拿到了一份没公开的订单。' : '传闻是监管盯上了一块核心业务。'}`);
+      break;                                  // 每月最多一条
+    }
+  }
+  return out;
+}
+
+/**
  * 跨越名次时的叙事日志。只跨这几个门槛才记一条 ——
  * 每月可能因为股价噪声反复换位，全写会刷屏；这几个门槛一生只有一次。
  */
@@ -212,7 +320,7 @@ export function worldTick(s, R = null) {
    * ⚠️ 2026-09-26 第二批 §2.6（进度钟）：`gameMonths` 现在是**幕次 + 幕内市值进度**的派生量
    *    ⇒ 世界榜由**玩家进度**驱动：玩家推进快，世界就走得快；卡在某一幕时**世界与玩家一起冻结**
    *    （这正是用户要的「玩得慢，时间就走得慢」）。旧「真实时间线性映射」口径已被取代。
-   *    8 幕跨度合计仍是 420 月，打满还是 2061 ⇒ 终局标定（第 35 年榜首 vs 玩家终值）不变。
+   *    8 幕跨度合计仍是 480 月，打满还是 2066 ⇒ 终局标定（第 40 年榜首 vs 玩家终值）不变。
    */
   const target = gameMonths(s);
   if (target > s.world.month) {
@@ -222,7 +330,13 @@ export function worldTick(s, R = null) {
      * 所以它就是环比的基准。（离线一次跳多个月时，基准会跨越那几个月 —— 这是能拿到的唯一真相。）
      */
     if (s.worldCap != null) s.worldPrevCap = s.worldCap;
-    advanceWorld(s.world, target - s.world.month);
+    const from = s.world.month;
+    advanceWorld(s.world, target - from);
+    /**
+     * 周期播报**只在这一支**（向前推进）。上面那个回拉分支是「重建 + 推进到 target」，
+     * 在那里播报会把整局的周期事件重播一遍。
+     */
+    for (const line of cycleNotes(from, target, s.world)) s.log.push(line);
   } else if (target < s.world.month) {
     /**
      * **旧档回拉**（2026-09-25）。

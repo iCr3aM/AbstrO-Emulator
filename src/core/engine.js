@@ -1,9 +1,9 @@
 /**
  * 引擎（GDD §1.5 / §1.6 / §1.7）
  * ===============================================================
- * 一个 tick 只做六件事，顺序不能换：
+ * 一个 tick 只做七件事，顺序不能换：
  *   ① 生产（净收入入账）→ ② 自动购买（买「等级最低」那条线）→ ③ 重算
- *   → ④ 进度钟（日历 = 阶段内市值进度）→ ⑤ 融资 → ⑥ 世界榜 / 推幕 / 年度报告
+ *   → ④ 进度钟（日历 = 阶段内市值进度）→ ⑤ 融资 → ⑥ 订单 → ⑦ 世界榜 / 推幕 / 年度报告
  *
  * ⚠️ 年度决策**并在这里**（GDD §3.2 明确：不新建文件）。它是全作唯一的抉择层：
  *   在线不弹窗，主界面只显示待决角标；积压上限 `PENDING_CAP` 条，第 4 条起按默认选项自动结算。
@@ -13,17 +13,26 @@
  */
 
 import {
-  ACTS, LINES, PENDING_CAP, AUTO_BUY_RESERVE, MANUAL_GAIN,
-  AUTO_DECIDE_STAGE, FOCUS, FOCUS_EVEN, FOCUS_LAG,
+  ACTS, PENDING_CAP, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, MILESTONES,
+  AUTO_DECIDE_STAGE,
   eventsFor, eventById, companyName,
 } from './content.js';
-import { rates, derived, purchase, lowestLine, costFor, lineLevel } from './economy.js';
+import { rates, derived, purchase, lowestLine, costFor, spendableOf } from './economy.js';
 import { financeTick, isListed } from './finance.js';
+import { ordersTick } from './orders.js';
 import { worldTick } from './world.js';
 import { calMonthOf, gameYear, gameMonths } from './format.js';
 
-/** 日志保留条数（存档里只留最后 40 条，见 state.serialize） */
-export const LOG_MAX = 60;
+/**
+ * 日志保留条数（存档里只留最后 40 条，见 `state.serialize`）。
+ *
+ * ⚠️ 60 → 120（用户 2026-09-27「日志又出现刷屏」）：一局全程约 176 行，
+ *    而 8× 倍速下这 176 行只占 **40 分钟真实时间**（一局一共就这么长），
+ *    60 条 ≈ 13 分钟的历史 —— 翻两下就到底了，观感就是「一直在刷」。
+ *    真正压掉条数的是 `orders.js` 的**窗口归并**（订单占全程 45%，见那里），
+ *    这里只是把「能回看多久」翻一倍。
+ */
+export const LOG_MAX = 120;
 /** 一次 tick 内自动购买的次数上限 —— 防「一次大额到账」时把循环卡住 */
 const AUTO_BUY_MAX = 16;
 
@@ -44,49 +53,33 @@ export function applyEffect(s, eff, R) {
 
 // ─────────────────────────── 自动购买与手动购买（§1.6）───────────────────────────
 /**
- * 这一 tick 自动该买哪条线（GDD §1.6 的「方向」）：
- *   · `even`（默认）= 等级最低的那条 —— 均衡，与旧版完全一致；
- *   · 某条线 id   = 优先它，但**失衡会自动回补**：它一旦比最低线高出 `FOCUS_LAG` 级，
- *                  这一 tick 就改买最低线。
- * 为什么要回补：三条线共用 `cost(n)`，偏科会让后续购买按 `(r/g)^L = 1.085^L` 变慢，
- * 方向只能"偏一点"，偏死就拖垮整局 —— 所以方向是**取舍**（更快点亮本幕目标 vs 整体略慢），
- * 不是一个「选了就更快」的按钮。
- */
-function nextLine(s) {
-  const low = lowestLine(s);
-  const focus = s.focus || FOCUS_EVEN;
-  if (focus === FOCUS_EVEN) return low;
-  return lineLevel(s, focus) - lineLevel(s, low) >= FOCUS_LAG ? low : focus;
-}
-
-/**
  * 每 tick 买一条线 —— 这是游戏**真正的引擎**，玩家不在它也一直转。
- * 三条线共用 `cost(n)` ⇒ 均衡时「等级最低 = 最便宜」，自动维持。
+ * 买**等级最低的那条**：所有线共用 `cost(n)` ⇒ 均衡时「等级最低 = 最便宜」，
+ * 均衡由公式自动维持，玩家不需要算（GDD §1.6）。
  *
- * 门槛是 `AUTO_BUY_RESERVE × cost` 而不是 `cost`：自动要留一份储备才动手，
- * 于是**每个购买周期里有半段时间钱是够手动买的**（`AUTO_BUY_RESERVE = 2`）。
+ * 门槛是 `K × cost` 而不是 `cost`：自动要留 K−1 份储备才动手，
+ * 于是**每个购买周期里约 `(K−1)/K` 的时间钱是够手动买的**。
  * 没有这个储备，钱会在同一个 tick 里被买光，手动按钮永远点不动。
+ *
+ * ⚠️ `K` 是**两档**的（用户 2026-09-27）：**融资前**用 `AUTO_BUY_RESERVE_EARLY`（= 6），
+ *    天使轮到账后回到 `AUTO_BUY_RESERVE`（= 2）。融资前那一段，自动的窗口被压得很小
+ *    —— 玩家一动手就把它挤出去，所以**那一段实际上是玩家自己点的**（这正是用户要的
+ *    「公司和创始人在做融资之前都只能玩家自己点击」）。注意它**不改变挂机的稳态速率**
+ *    （两次购买之间永远隔一个 `cost` 的时间），所以挂机玩家照样能通关（见 content.js）。
  */
 function autoBuy(s) {
   let n = 0;
-  let id = nextLine(s);
-  while (n < AUTO_BUY_MAX && s.money >= AUTO_BUY_RESERVE * costFor(s, id)) {
-    purchase(s, id);
-    id = nextLine(s);
+  let id = lowestLine(s);
+  const K = autoBuyReserveOf(s);
+  /**
+   * ⚠️ 门槛是「**可动用现金**（现金 × (1 − 储备比例)）≥ `K × cost`」，
+   *    而不是现金本身 —— 储备金是账上不能动的那笔钱（见 `content.RESERVE_FRAC`）。
+   */
+  while (n < AUTO_BUY_MAX && spendableOf(s) >= K * costFor(s, id)) {
+    purchase(s, id, 1);
+    id = lowestLine(s);
     n += 1;
   }
-  if (n > 0) logPurchases(s);
-}
-
-/**
- * 设定自动购买的方向（GDD §1.6）。玩家的动作一共只有三个：点一条投资线、
- * 结算一条待决、改一次方向 —— 这就是「玩家做大方向决策」里那个**方向**。
- * @returns {boolean} 是否是合法方向
- */
-export function setFocus(s, id) {
-  if (!FOCUS.some(f => f.id === id)) return false;
-  s.focus = id;
-  return true;
 }
 
 /**
@@ -96,29 +89,7 @@ export function setFocus(s, id) {
  * @returns {boolean} 是否买成
  */
 export function manualBuy(s, id) {
-  return purchase(s, id, MANUAL_GAIN);
-}
-
-/**
- * 流水里的购买行按**时间窗合并**（30 真实秒，随最后一次购买顺延）：
- * 窗口内只就地改写同一行，行数不涨。累积状态挂在模块级 WeakMap，**不进存档**
- * （存了就会变成「关掉页面再打开，突然冒出一行旧账」）。
- */
-const BURST_WINDOW = 30;
-const bursts = new WeakMap();
-function logPurchases(s) {
-  const now = s.elapsed || 0;
-  let b = bursts.get(s);
-  if (!b || now - b.at >= BURST_WINDOW) { b = { at: now, idx: -1, line: '' }; bursts.set(s, b); }
-  b.at = now;
-  const text = `🔨 ${LINES.map(l => `${l.name} Lv${lineLevel(s, l.id)}`).join(' · ')}`;
-  if (b.idx < 0) b.idx = s.log.length;
-  else if (s.log[b.idx] !== b.line) {
-    const i = s.log.lastIndexOf(b.line);
-    b.idx = i >= 0 ? i : s.log.length;
-  }
-  s.log[b.idx] = text;
-  b.line = text;
+  return purchase(s, id, MANUAL_GAIN, MANUAL_PAY);
 }
 
 // ─────────────────────────── 年度决策（§1.5）───────────────────────────
@@ -186,46 +157,81 @@ function annualReport(s, R, D) {
   const y = gameYear(s);
   if (y <= s.lastYear) return;
   s.lastYear = y;
+  /**
+   * 日志里的年份写**日历的 20xx 年**（用户 2026-09-27），不写「第 N 年」——
+   * `gameYear` 是 1 起的叙事年序（第 1 年 = 2026），所以实际年份是 `2026 + y − 1`。
+   * 它是「本年报发布时」的日历年份，与顶部的 HUD 日期同源（都是市值进度钟的派生量）。
+   */
+  const tag = `【${2026 + y - 1} 年】`;
 
   const ev = drawEvent(s);
-  if (!ev) { s.log.push(`【第 ${y} 年】无待决`); return; }
+  if (!ev) { s.log.push(`${tag}无待决`); return; }
 
   /**
    * 第 `AUTO_DECIDE_STAGE` 幕起**不再交给玩家**（GDD §1.5「前期玩家操作、后期自动化」）：
    * 那时公司已经大到三个人管不过来，年度事件由团队按**保守项**自行处理，不进待决队列。
-   * 玩家剩下的动作只有自动购买的方向（§1.6）。
+   * 玩家剩下的动作只有点投资线（§1.6）。
    */
   if (s.stage >= AUTO_DECIDE_STAGE) {
     const opt = ev.options[ev.default];
     applyEffect(s, opt.eff, R);
     s.autoDecided += 1;
-    s.log.push(`【第 ${y} 年】${ev.title} → ${opt.text}`);
+    s.log.push(`${tag}${ev.title} → ${opt.text}`);
     return;
   }
 
   s.pending.push({ uid: ++s.uidSeq, id: ev.id });
   // 积压上限：第 4 条起按默认选项自动结算（在线、离线同一条规则）
   const spilled = s.pending.length > PENDING_CAP ? resolveByDefault(s, s.pending.length - PENDING_CAP, R) : 0;
-  s.log.push(`【第 ${y} 年】${s.pending.length ? `待决 ${s.pending.length} 条` : '无待决'}`
+  s.log.push(`${tag}${s.pending.length ? `待决 ${s.pending.length} 条` : '无待决'}`
     + (spilled ? ` · 另有 ${spilled} 条已按默认处理` : ''));
 }
 
 // ─────────────────────────── 推幕与目标 ───────────────────────────
 /**
- * 阶段目标是否达成（**只用于 HUD 打勾**，不额外加闸）。
- * 七条与 `ACTS[].goal` 的文案一一对应，阈值全部实测反推 ⇒ **每条都在本幕之内被跨过**
+ * 阶段目标是否达成（**只用于 HUD 高亮那格**，不额外加闸）。
+ * 八条与 `ACTS[].goal` 的文案一一对应，阈值全部实测反推 ⇒ **每条都在本幕之内被跨过**
  * （推演与理由见 `content.js` 的 `ACTS` 注释）。
+ *
+ * 八章里三类判据各司其职：
+ *   · 产品/团队/营收（第 1/2/3 章）—— 用 `rates()` 的派生量，读者一眼能懂；
+ *   · 市值刻度（第 5 章）—— 直接用 `D.marketCap ≥ 4e10`（约 400 亿元 ≈ $56 亿）；
+ *   · 融资轮（第 4/6/7 章）—— 看 `finance.rounds`，与 `finance.js` 的年份表同源；
+ *   · 第 8 章「登顶」—— 看 `s.worldRank`，与唯一结局共用同一个判据。
+ *
+ * ⚠️ 第 2/3/5 章的阈值必须同时满足「**高于本章入场值**」和「**低于本章末值**」——
+ *    八章的市值阶梯一变（`npm run tune` 会重排），这三个数就要跟着复核。
+ *    阈值一律取**幕中实测值**（见 `tools/.tmp-bal.mjs` 的量法），落点约在本章 50% 处。
+ *    ⚠️ 五条线制下 `g = r^(1/5) = 1.0247`（旧三条线制是 `r^(1/3) = 1.0416`），
+ *    同一个效果数字对应的等级**高了一截** —— 三线制下的老阈值（team ≥ 2.5、cap ≥ 2e11）
+ *    在新阶梯上**整章都够不着**，必须按幕中实测重设。
  */
 export function stageGoalMet(s, R, D) {
+  const rounds = (s.finance && s.finance.rounds) || [];
   switch (s.stage) {
-    case 1: return R.prod >= 1.05;
-    case 2: return R.team >= 1.25;
-    case 3: return D.sharePct >= 35;
-    case 4: return (s.finance.rounds || []).includes('a');
-    case 5: return R.revenue >= 5e7;
-    case 6: return R.revenue >= 5e9;
-    case 7: return s.worldRank === 1;
+    case 1: return R.prod >= 1.13;              // 做出原型：产品力第一次被买起来（幕中 1.138）
+    case 2: return R.team >= 1.60;              // PMF：团队效率把交付扛住（幕中 1.615）
+    case 3: return R.revenue >= 3e7;            // 千万级大订单：年营收站上 3000 万（幕中 3.04e7）
+    case 4: return rounds.includes('a');        // 完成 A 轮融资
+    case 5: return D.marketCap >= 4e10;         // 估值破四百亿元（幕中 4.38e10）
+    case 6: return rounds.includes('preIpo');   // 完成 Pre-IPO 轮
+    case 7: return rounds.includes('ipo');      // IPO 敲钟
+    case 8: return s.worldRank === 1;           // 登顶世界第一
     default: return false;
+  }
+}
+
+/**
+ * 叙事里程碑（`content.MILESTONES`）：跨过阈值的那一刻**只记一条日志**，不加机械效果。
+ * 去重靠 `s.mcapMilestones`（存的是下标，不是浮点阈值 —— 存浮点迟早会因为精度对不上）。
+ */
+function logMilestones(s, D) {
+  if (!s.mcapMilestones) s.mcapMilestones = [];
+  for (let i = 0; i < MILESTONES.length; i++) {
+    if (D.marketCap >= MILESTONES[i].v && !s.mcapMilestones.includes(i)) {
+      s.mcapMilestones.push(i);
+      s.log.push(MILESTONES[i].text);
+    }
   }
 }
 
@@ -266,15 +272,21 @@ export function tick(s, dtReal = 0.1) {
   R = rates(s);
   const D = derived(s, R);
 
-  // ④ 进度钟：日历 = 阶段起点 + 阶段内市值进度 × 5 年（玩得快，时间就走得快）
+  // ④ 进度钟：日历 = 市值在对数轴上的位置（玩得快，时间就走得快）
+  //    ⚠️ `calMonthOf` 内部取的是 `D.marketCapBase`（**不含估值周期**）——
+  //    估值会让市值跌，而日期永远不许倒退（用户 2026-09-27 的宏观周期，见 economy.derived）
   s.calMonth = calMonthOf(s, D);
 
   // ⑤ 融资（按日历年到点；IPO 看市值）
   financeTick(s, R, D);
 
-  // ⑥ 世界榜（与日历同一真相源）→ 推幕 → 年度报告
+  // ⑥ 订单（按日历月生成；到期未点则自动交付 ×0.9）—— 只给现金，不动收入公式
+  ordersTick(s, R);
+
+  // ⑦ 世界榜（与日历同一真相源）→ 推幕 → 里程碑 → 年度报告
   worldTick(s, R);
   advanceStage(s, D);
+  logMilestones(s, D);
   annualReport(s, R, D);
 
   // 登顶 = 唯一结局的判据（`worldRank` 由 world.js 维护，这里不另算一遍）

@@ -2,19 +2,19 @@
  * 游戏状态 + 存档序列化（GDD §3.2）
  * ===============================================================
  * 原则：**只存「原始事实」，不存「派生值」**。
- *   存：现金、三条线的等级、已做的决策、世界表
+ *   存：现金、五条线的等级、已做的决策、世界表、在手订单
  *   不存：产品力 / 份额 / 团队效率 / 年营收 / 市值 / 名次 —— 每次由 `economy.rates()` 重算
  * 所以永远不会有「存档里的加成和资源对不上」这类 bug。
  */
 
-import { ACTS, OPENING, LINES, FOCUS, FOCUS_EVEN } from './content.js';
+import { ACTS, OPENING, LINES } from './content.js';
 
 /**
- * ⚠️ 版本号从 18 直接跳到 19：v4 是**重制**，字段含义全变了
- * （`buildings` 座数 → `lines` 等级、`resources.money` → `money`、多了 `mod`）。
- * 旧档无法迁移，`migrate()` 直接给一份新状态 —— 不做半吊子的字段搬运。
+ * ⚠️ 版本号 20 → 21：新增**订单**子系统（用户 2026-09-27）。旧档没有 `orders.next`，
+ * 直接合出一份「从第 0 月起补生成订单」的档会一次涌出十几条 —— 与 19 → 20
+ * （七幕改八章）同一先例：`migrate()` 返回 null ⇒ 给一份新状态，不做半吊子的字段搬运。
  */
-export const SAVE_VERSION = 19;
+export const SAVE_VERSION = 21;
 export const SAVE_KEY = 'abstract-studio.save.v1';
 
 export function createState() {
@@ -35,7 +35,7 @@ export function createState() {
 
     stage: 1,
     money: 0,
-    /** 三条线的等级（只增不减） */
+    /** 五条线的等级（只增不减） */
     lines: Object.fromEntries(LINES.map(l => [l.id, 0])),
     /**
      * 决策带来的修正。三类变量与 PE 各一个累加器 ——
@@ -71,14 +71,29 @@ export function createState() {
     worldRank: null,
     worldBest: 999,
     worldMilestones: [],
+    /** 已经记过的**叙事里程碑下标**（`content.MILESTONES` 的顺序号）—— 只记日志，不加效果 */
+    mcapMilestones: [],
 
     // ── 融资（`finance.rounds` 已完成的轮次 id）──
     finance: { rounds: [] },
 
+    /**
+     * 订单（`orders.js`）：`next` = 下一条要生成的序号（第 n 条在第 `n × 6` 个月出现），
+     * `live` = 在手 `[{ uid, tier, born }]`，上限 `ORDER_SLOTS` 条，`done` = 累计交付数。
+     * 只存这几个原始事实，「还有几个月到期 / 值多少钱」都是派生量。
+     * ⚠️ `done` 是 2026-09-27 补的纯计数（界面右上角「已完成 N 项」）——`migrate` 的
+     *    `{ ...fresh.orders, ...(data.orders || {}) }` 已经会让旧档拿到 0，**不必升版本**。
+     */
+    orders: { next: 0, live: [], done: 0 },
+
     // ── 设置 ──
     speed: 1,
-    /** 自动购买的方向（`FOCUS[].id`；默认 `even` = 永远买等级最低的那条） */
-    focus: FOCUS_EVEN,
+    /**
+     * 音效开关（`src/ui/audio.js`）。默认开 —— 音效只是动作的回执、不是信息，
+     * 关掉不会少看一个数，所以在 ⚙ 里留一个开关就够。
+     * ⚠️ 它是**顶层字段**，`deserialize` 的 `{ ...fresh, ...data }` 会让旧档自动拿到 `true`。
+     */
+    sfx: true,
 
     /** 结局：`'top'` = 唯一结局「登顶」，否则 null（游戏继续） */
     ending: null,
@@ -87,7 +102,8 @@ export function createState() {
 
 /** 序列化：去掉运行时派生字段，裁日志 */
 export function serialize(s) {
-  const { calMonth, ...save } = s;
+  // 不存：`calMonth`（进度钟缓存）、`orderWin`（订单日志的归并窗口，见 orders.js）
+  const { calMonth, orderWin, ...save } = s;
   return JSON.stringify({ ...save, savedAt: Date.now(), log: s.log.slice(-40) });
 }
 
@@ -106,15 +122,16 @@ export function deserialize(raw) {
   merged.lines = { ...fresh.lines, ...(data.lines || {}) };
   merged.mod = { ...fresh.mod, ...(data.mod || {}) };
   merged.finance = { ...fresh.finance, ...(data.finance || {}), rounds: (data.finance && data.finance.rounds) || [] };
+  merged.orders = { ...fresh.orders, ...(data.orders || {}) };
+  merged.orders.live = (data.orders && data.orders.live) || [];
   merged.pending = (data.pending || []).filter(p => p && p.id);
   merged.seen = data.seen || [];
   merged.worldMilestones = data.worldMilestones || [];
+  merged.mcapMilestones = data.mcapMilestones || [];
   merged.log = Array.isArray(data.log) && data.log.length ? data.log : fresh.log;
-  // 三条线等级只增不减 —— 夹到合法区间，防手改存档
+  // 五条线等级只增不减 —— 夹到合法区间，防手改存档
   for (const l of LINES) merged.lines[l.id] = Math.max(0, Math.floor(merged.lines[l.id] || 0));
   merged.stage = Math.max(1, Math.min(ACTS.length - 1, merged.stage | 0));
-  // 方向必须是合法选项：手改存档写进来的野字符串会让 `nextLine` 去查一个不存在的线
-  merged.focus = FOCUS.some(f => f.id === merged.focus) ? merged.focus : FOCUS_EVEN;
   merged.version = SAVE_VERSION;
   return merged;
 }
