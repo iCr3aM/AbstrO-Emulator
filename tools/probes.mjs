@@ -71,7 +71,8 @@ import {
   CURVE_RATIO, LINE_GROWTH, INCOME_SCALE, SEC_PER_YEAR, RESERVE_FRAC, MILESTONES,
   OFFLINE_CAP_SEC, OFFLINE_MODIFIER, PE_MIN, PE_MAX, PE_BASE, START_MCAP, LINE_COST0,
   valAt, winterAt, cycleAt, VAL_CYCLE_AMP, COST_CYCLE_AMP, CYCLE_MONTHS, CYCLE_RISE, ORDER_TIERS,
-  FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, lineName,
+  FOUNDERS, agesAt, startYearOf, marginOf, salaryFrac, scaleFrac, companyName, NAME_TIERS,
+  RENAME_LINES, lineName,
   AUTO_BUY_RESERVE, AUTO_BUY_RESERVE_EARLY, autoBuyReserveOf, MANUAL_GAIN, MANUAL_PAY, AUTO_DECIDE_STAGE,
   DIL_MIN, DIL_AT, SAVOR_RATE,
   SAVOR_MONTHS_PER_MIN, SAVOR_END_MONTH, SAVOR_GAP_MID, SAVOR_GAP_AMP,
@@ -89,7 +90,7 @@ import {
   tick, pendingEvent, resolvePending, applyEffect, stageGoalMet, offlineRun, LOG_MAX,
   manualBuy, dilate, isSprint,
 } from '../src/core/engine.js';
-import { ROUNDS, isListed } from '../src/core/finance.js';
+import { ROUNDS, isListed, isValued } from '../src/core/finance.js';
 import { ENDING_TEXT, evaluateRetirement } from '../src/core/endings.js';
 import { applyOffline, save, load, wipe, disableSave, enableSave } from '../src/core/save.js';
 import {
@@ -426,7 +427,7 @@ probe('上市且名次 > 20 时钉底（>100 只报「>100」、不画升降、�
   need(meRowIdx > sepIdx, '玩家行没有排在分隔行之后（没钉到底部）');
   // 钉底那一行显示的是**公司名**，不是「我们」
   const meRow = root.innerHTML.slice(meRowIdx, root.innerHTML.indexOf('</div>', meRowIdx));
-  need(meRow.includes(companyName(isListed(s))), `玩家行没显示公司名（应为 ${companyName(isListed(s))}）`);
+  need(meRow.includes(companyName(s.stage)), `玩家行没显示公司名（应为 ${companyName(s.stage)}）`);
   need(!root.innerHTML.includes('>我们<'), '榜单里还留着「我们」这个称呼');
   // 名次在 100 开外 ⇒ 具体名次没有信息量，只报 >100（HUD 与钉行同一口径）
   need(s.worldRank > 100, `这条断言要名次 >100 才成立（实得 ${s.worldRank}）`);
@@ -623,6 +624,85 @@ probe('HUD 副行：市值「相比上月」/ 世界格「距下一轮 xx%」与
   need(out.includes('>100') && !/[↑↓]/.test(out), `名次 >100 时不该画箭头（实得「${out}」）`);
   setTab(TAB_FOUNDER);
   return `天使轮 ${angel[1]}% · Pre-IPO ${wantB}% · ×${m[1]} ／ 上市 #42 ↑3 · ↓2 · 持平无箭头 · >100 无箭头`;
+});
+
+/**
+ * **估值解锁**（用户 2026-09-28：「市值、PE 一开始可以不显示（创业初期显示为 `-`），
+ * 并且可以在天使轮之后才开始显示」）。
+ *
+ * 判据是 `finance.isValued` —— 与上面世界格那行「距天使轮 xx%」同一个真相源，
+ * 所以「进度条走到 100%」与「市值出现」落在同一天。
+ * ⚠️ fixture 必须用 `midState(1, 0)`：第 3 章那类中期档的天使轮早就到账了，验不出隐藏态。
+ */
+probe('估值解锁：天使轮到账前市值 / PE 留骨架，到账后才出数字', () => {
+  const s = midState(1, 0);                        // 第 1 章、五条线 0 级 ⇒ 一轮都没融
+  need(!isValued(s), '第 1 章开局就被判成「已估值」—— 这条探针验不到隐藏期');
+  // `class="cell"` 切开后，第 2 块就是市值格（第 3 块那半格用的是 `class="half"`）
+  const cells = () => root.innerHTML.split('class="cell"').slice(1);
+  const capCell = () => cells()[1];
+  lookTab(s, TAB_FOUNDER);
+  need(capCell().includes('<b>—</b>'), `隐藏期市值大字不是 —（实得 ${capCell()}）`);
+  need(!capCell().includes('预估'), '隐藏期还写着「预估」—— 那时连预估都没有');
+  need(capCell().includes('年营收'), '隐藏期把「年营收」也一起藏了（营收是事实，不是估值）');
+  need(capCell().includes('相比上月 —'), '隐藏期「相比上月」没写成 —');
+  need(visible(root.innerHTML).includes('PE —'), '隐藏期 PE 行没写成「PE —」');
+
+  // 天使轮到账 ⇒ 数字解禁（用真实字段，不 mock 渲染分支）
+  s.finance.rounds = ['angel'];
+  need(isValued(s), 'rounds 里有 angel 却没被判成已估值');
+  const D = derived(s);
+  // 「相比上月」要有基准才出数（`capMomOf` 看 `s.worldPrevCap`）—— 给一个上月末快照
+  s.worldPrevCap = toUSD_T(D.marketCap) * 2;
+  lookTab(s, TAB_FOUNDER);
+  need(capCell().includes(`¥${fmt(D.marketCap)}`), `解锁后市值大字不是 ¥${fmt(D.marketCap)}（实得 ${capCell()}）`);
+  need(/相比上月 <em class="(up|down)">/.test(capCell()), '解锁后「相比上月」还是 —');
+  need(/PE \d+ 倍/.test(visible(root.innerHTML)), '解锁后 PE 没出数字');
+  return `隐藏期 市值 — / PE —（年营收照常） → 天使轮后 ¥${fmt(D.marketCap)} / PE ${D.pe.toFixed(0)} 倍`;
+});
+
+/**
+ * **公司名阶梯**（用户 2026-09-28：「公司更名改为阶段：Abstract Studio、Abstract Labs、
+ * Abstract Tech、Abstra、AbstrO」）。
+ *
+ * 五段嵌八章 = 2+2+2+1+1；改名**只发生在换幕**（`engine.advanceStage`），
+ * 敲钟不再是改名点（见上一条探针）。
+ */
+probe('公司名阶梯：五段名字按章查表，改名只发生在换幕（一局恰好 4 条）', () => {
+  // ⓐ 逐章查表 —— 八章映射到 5 个名字
+  const want = [null, 'Abstract Studio', 'Abstract Studio', 'Abstract Labs', 'Abstract Labs',
+    'Abstract Tech', 'Abstract Tech', 'Abstra', 'AbstrO'];
+  need(NAME_TIERS.length === ACTS.length, `NAME_TIERS 长度 ${NAME_TIERS.length} ≠ 章数 ${ACTS.length}`);
+  const seen = [];
+  for (let a = 1; a <= 8; a++) {
+    need(companyName(a) === want[a], `第 ${a} 章公司名应为 ${want[a]}（实得 ${companyName(a)}）`);
+    if (!seen.includes(want[a])) seen.push(want[a]);
+  }
+  need(seen.join('|') === 'Abstract Studio|Abstract Labs|Abstract Tech|Abstra|AbstrO',
+    `五段阶梯顺序不对：${seen.join(' → ')}`);
+  // 章次越界（0 与 99）应回落到第一段，不该露出 undefined
+  need(companyName(0) === 'Abstract Studio' && companyName(99) === 'Abstract Studio',
+    '章次越界时公司名没回落到第一段');
+
+  // ⓑ 四条叙事：一一对应、互不相同、宽度都进预算（≤46 单位）
+  const names = seen.slice(1);                     // 后四个名字各有一次改名
+  need(Object.keys(RENAME_LINES).length === 4, `RENAME_LINES 应恰好 4 条（实得 ${Object.keys(RENAME_LINES).length}）`);
+  const texts = [];
+  for (const n of names) {
+    const t = RENAME_LINES[n];
+    need(t, `缺 ${n} 的改名叙事`);
+    need(units(t) <= 46, `${n} 的改名叙事 ${units(t)} 单位 > 46（手机日志栏会折行）`);
+    texts.push(t);
+  }
+  need(new Set(texts).size === 4, '四条改名叙事有重复');
+
+  // ⓒ 端到端：真跑一局 ⇒ `【改名】` 恰好 4 条，且与后四个名字一一对应
+  const hits = A.allLogs.filter(t => t.includes('【改名】'));
+  need(hits.length === 4, `一局应恰好 4 条【改名】（实得 ${hits.length}）：${hits.join(' / ')}`);
+  for (const n of names) {
+    need(hits.filter(t => t === RENAME_LINES[n]).length === 1, `【改名】里 ${n} 不是恰好一条`);
+  }
+  need(!A.allLogs.some(t => t.includes('Abstract Inc')), '日志里还留着已经不存在的 Abstract Inc');
+  return `五段 ${seen.join(' → ')} ／ 一局 ${hits.length} 条改名`;
 });
 
 /**
@@ -958,7 +1038,7 @@ probe('阶段推进：唯一机械闸门是「市值 ≥ 本章 mcap」', () => 
   return `${START_MCAP.toExponential(2)} → ${ACTS[8].mcap.toExponential(2)}（8 档）`;
 });
 
-probe('上市时点：第 7 章中段敲钟（不再与 A 轮挤在同一幕）', () => {
+probe('上市时点：第 7 章中段敲钟（不再与 A 轮挤在同一幕，且敲钟本身不改名）', () => {
   // 七轮的年份必须落在**各自那一章**的区间里，否则会出现「先上市、后到账」
   const wantChapter = { angel: 2, preA: 2, a: 4, b: 4, c: 5, preIpo: 6 };
   for (const r of ROUNDS) {
@@ -978,8 +1058,13 @@ probe('上市时点：第 7 章中段敲钟（不再与 A 轮挤在同一幕）'
   tick(s, 0);
   need(isListed(s), `市值 ¥${(derived(s).marketCap).toExponential(3)} 越过上线却没敲钟`);
   need(s.stage === 7, `敲钟应发生在第 7 章之内（实得第 ${s.stage} 章）`);
-  need(s.log.some(t => t.includes(companyName(true))), '敲钟没有改名日志');
-  return `IPO 落在第 7 章：${IPO_LINE.toExponential(2)} ∈ (${ACTS[6].mcap.toExponential(2)}, ${ACTS[7].mcap.toExponential(2)})`;
+  /**
+   * ⚠️ 2026-09-28 反转：敲钟**不再是改名点**。公司名改成按**章**查表（`content.NAME_TIERS`），
+   *    第 7 章一进来就叫 `Abstra`，改名统一由 `engine.advanceStage` 在**换幕**那一刻推叙事。
+   *    所以敲钟那一 tick 里**不该**出现任何 `【改名】`（它没换幕）。
+   */
+  need(!s.log.some(t => t.includes('【改名】')), '敲钟那一 tick 冒出了改名日志 —— 改名只应发生在换幕');
+  return `IPO 落在第 7 章：${IPO_LINE.toExponential(2)} ∈ (${ACTS[6].mcap.toExponential(2)}, ${ACTS[7].mcap.toExponential(2)}) ／ 敲钟不改名`;
 });
 
 probe('阶段目标：前七条都在**本章之内**被打勾，第八条 = 结局', () => {

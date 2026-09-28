@@ -15,7 +15,7 @@ import {
 import { rates, derived, manualCostOf, canAffordManual, sharePctOf } from '../core/economy.js';
 import { ORDER_SLOTS, liveOf, liveCount, hasHot, isHot, monthsLeftOf, valueOf, describeOrder, doneCount } from '../core/orders.js';
 import { ranking, toUSD_T, SECTOR_LABEL, hotSector, WORLD_START_YEAR } from '../core/world.js';
-import { isListed, ROUNDS, yearNow } from '../core/finance.js';
+import { isListed, isValued, ROUNDS, yearNow } from '../core/finance.js';
 import { gameDate, gameYear } from '../core/format.js';
 import { pendingEvent, stageGoalMet, LOG_MAX, dilate, isSprint } from '../core/engine.js';
 import { ENDING_TEXT } from '../core/endings.js';
@@ -234,6 +234,26 @@ function hud(s, R, D) {
     : dRank < 0 ? ` <em class="down">↓${-dRank}</em>` : '';
   const mom = capMomOf(s, D);
   /**
+   * **估值解锁**（用户 2026-09-28：「市值、PE 一开始可以不显示（创业初期显示为 `-`），
+   * 并且可以在天使轮之后才开始显示」）。
+   *
+   * 天使轮到账之前，公司只有三张折叠桌 —— 那时写 `市值 预估 ¥432万` / `PE 12 倍` 是纯噪声。
+   * 判据是 `finance.isValued`（与下面世界格那行「距天使轮 xx%」**同一个真相源**，
+   * 所以「进度条走到 100%」与「市值出现」落在同一天）。
+   *
+   * 隐藏期**留骨架**（用户三选一里选的那档）：
+   *   · 市值格：标签退回 `市值`（**不写「预估」** —— 那时连预估都没有）、大字 `—`、
+   *     「相比上月」也写 `—`；但 **「年营收」照常显示**（营收是事实，不是估值）；
+   *   · 净利率格的 PE 行写 `PE —`；`净利率` 大字照常（`margin` 与估值无关）。
+   * ⚠️ 破折号用 `—` 而不是 `-`：与「相比上月 `—`」「世界 `—`」同一口径 ——
+   *    一屏里只有一个「没有值」的写法。
+   * ⚠️ 格子**行数不变**（上行 4 行 / 下行 3 行）⇒ `.hud` 的 `grid-template-rows: 90px 74px` 不用动。
+   */
+  const valued = isValued(s);
+  const capLabel = valued && !listed ? '<em>预估</em>' : '';   // 隐藏期不写「预估」
+  const capText = valued ? `¥${fmt(D.marketCap)}` : '—';
+  const peText = valued ? `PE ${D.pe.toFixed(0)} 倍` : 'PE —';
+  /**
    * 世界格的**第三行** —— 原来写「未上市 / 已上市」，2026-09-28 起换成
    * **「距下一轮融资的时间进度」**（用户诉求 #8：「距 xx 天使轮 b轮等 改为百分比 xx%」）。
    *
@@ -249,7 +269,7 @@ function hud(s, R, D) {
    * ⚠️ `距上市 ×N` **只保留整数**：一位小数会写出 `×41.7万`，会溢出。
    *
    * ⚠️ **上市之后这一行留空**（用户 2026-09-28 裁决）：原来那行「已上市」与页头的
-   *    公司名（已经变成 `Abstract Inc`）是同一件事说两遍。
+   *    公司名（那时会写成 `Abstract Inc`；现在按章查表，第 7 章起叫 `Abstra`）是同一件事说两遍。
    */
   let worldSub = '';
   if (!listed) {
@@ -267,8 +287,8 @@ function hud(s, R, D) {
   return `
   <div class="hud">
     <span class="cell"><i>现金<em>${rateOf(liveNet(s, R.netPerSec))}</em></i><b>¥${fmt(s.money)}</b><u>可动用 ¥${fmt(D.spendable)}</u><u>储备 ¥${fmt(D.reserve)}</u></span>
-    <span class="cell"><i>市值${listed ? '' : '<em>预估</em>'}</i><b>¥${fmt(D.marketCap)}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>相比上月 ${mom == null ? '—' : dirEm(mom)}</u></span>
-    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>PE ${D.pe.toFixed(0)} 倍</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}${worldDelta}</b><u>${worldSub}</u></span></span>
+    <span class="cell"><i>市值${capLabel}</i><b>${capText}</b><u>年营收 ¥${fmt(D.revenue)}</u><u>相比上月 ${valued && mom != null ? dirEm(mom) : '—'}</u></span>
+    <span class="cell"><span class="half"><i>净利率</i><b>${(R.margin * 100).toFixed(0)}%</b><u>${peText}</u></span><span class="half"><i>世界</i><b class="${rankClass(r)}">${ranked}${worldDelta}</b><u>${worldSub}</u></span></span>
     <span class="cell goal"><i>本阶段目标${goal ? '<em class="ok">完成</em>' : ''}</i><b${goal ? ' class="done"' : ''}>${esc(a.goal)}</b><u>${esc(who)}</u></span>
   </div>`;
 }
@@ -434,7 +454,7 @@ function rankBlock(s, D) {
     : 1;
   const { top, all } = ranking(s.world, cap, RANK_SHOW, s.worldPrevCap ?? null, frac);
   const me = all.find(c => c.me);
-  const mine = companyName(listed);
+  const mine = companyName(s.stage);   // 公司名按**章**查表（`content.NAME_TIERS`，五段阶梯）
   const row = c => {
     const key = c.me ? 'me' : c.n;
     const showDelta = !(c.me && c.rank > RANK_MAX);
@@ -648,7 +668,7 @@ export function render(root, s) {
   root.innerHTML = `
   <header class="head">
     <div class="brand">
-      <b>${esc(companyName(isListed(s)))}</b>
+      <b>${esc(companyName(s.stage))}</b>
       <span>${gameDate(s)} · ${esc(a.place)}</span>
     </div>
     <div class="tools">

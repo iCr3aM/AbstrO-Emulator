@@ -51,6 +51,8 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.
  *    = 2.59e13 元），写 8 是为了让截图覆盖**最终章**的界面 —— 五条线的终章名称、
  *    八条推幕行、HUD 目标「登顶世界第一」。`advanceStage` 只升不降，所以这个 8 会一直留着。
  * ⚠️ 五条线**同级**（`g^ΣL` 只由 ΣL 决定，所以加线不改市值）；漏掉 c/d 会少两个因子。
+ * ⚠️ 章次是 8 ⇒ 页头品牌与榜单玩家行都取 `content.NAME_TIERS[8]` = **`AbstrO`**（不是 `Abstract Inc`）——
+ *    公司名自 2026-09-28 起按**章**查表（五段阶梯），这些字符串都随本档的 `s.stage` 走。
  */
 function lateSaveJson() {
   const s = createState();
@@ -185,6 +187,8 @@ for (const vp of VIEWPORTS) {
      *   ② 把每个数值行 / 副行换成**最长的现实文本**（`¥2500.00万亿`）后再量 —— 高度必须一模一样。
      *      这条才是真断言：格子一旦跟着字数长高，这里立刻红。
      * ⚠️ 只塞 `b` / `u`，不碰 `i`：标签行没有 `nowrap`，塞超长串会自己折行，那是假阳性。
+     * ⚠️ **fresh 档的市值格现在是骨架态**（大字 `—`、`PE —`，天使轮到账后才解锁，见 `render.hud`）——
+     *    行高断言不受影响正因为它会把每个 `b` 都换成 `¥2500.00万亿` 再量，与档里原本是 `—` 还是数值无关。
      */
     const hudCells = await page.evaluate(() => {
       const cells = [...document.querySelectorAll('.hud .cell')];

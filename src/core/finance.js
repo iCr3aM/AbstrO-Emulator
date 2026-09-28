@@ -8,7 +8,7 @@
  * ⚠️ IPO 没有领投方（公开发行不是某一家投的），界面须能处理 `investor` 为空。
  */
 
-import { IPO_LINE, companyName } from './content.js';
+import { IPO_LINE } from './content.js';
 import { fmtShort, gameMonths } from './format.js';
 
 /**
@@ -68,6 +68,21 @@ export const ROUNDS = [
 /** 已上市的判据：`rounds` 里有 ipo（世界榜据此决定要不要把玩家排进去） */
 export const isListed = s => !!(s.finance && s.finance.rounds.includes('ipo'));
 
+/**
+ * 估值是否**已解锁**（用户 2026-09-28：「市值、PE 一开始可以不显示（创业初期显示为 `-`），
+ * 并且可以在天使轮之后才开始显示」）。
+ *
+ * 判据是**天使轮到账**，与 HUD 世界格那行「距天使轮 xx%」**同一个真相源**
+ * （`render.hud` 的 `worldSub` 拿的是「第一个未完成的轮次」）⇒
+ * 「进度条走到 100%」与「市值出现」落在同一天，不会出现「进度已满但还没数」的错位。
+ *
+ * 在此之前（第 1 章整章 + 第 2 章前 1/4）HUD 的市值格与 PE 行只留骨架（`—`）——
+ * 那时公司只有三张折叠桌，`市值 432 万` / `PE 12 倍` 都是纯噪声。
+ * ⚠️ 它只管**显示**：`derived().marketCap` 照算 —— 进度钟（`calMonthOf`）、推幕闸门
+ *    （`advanceStage`）、叙事里程碑都读那个数，一个都不能跟着藏。
+ */
+export const isValued = s => !!(s.finance && s.finance.rounds && s.finance.rounds.includes('angel'));
+
 /** 当前日历年（进度钟的派生量）—— HUD 的「距下一轮 N 年」也用它，别在别处再算一遍 */
 export const yearNow = s => 2026 + Math.floor(gameMonths(s) / 12);
 
@@ -86,8 +101,11 @@ export function financeTick(s, R, D) {
     s.money += got;
     if (r.pe) s.mod.pe += r.pe;
     s.log.push(`【${r.name}】到账 ¥${fmtShort(got)}（${r.investor || '公开发行'}）`);
-    if (r.id === 'ipo') {
-      s.log.push(`【改名】${companyName(false)} 改名 ${companyName(true)}。`);
-    }
+    /**
+     * ⚠️ 原来这里在 `ipo` 那一轮还推一条 `【改名】… Abstract Inc` —— **已删**（2026-09-28）。
+     *    公司名改成按**章**查表（`content.NAME_TIERS`，五段阶梯）之后，第 7 章一进来就叫 `Abstra`，
+     *    敲钟**不再是改名点**。改名统一由 `engine.advanceStage` 在**换幕**那一刻推叙事
+     *    （`content.RENAME_LINES`）。留在这里会推出第二遍，而且名字还是已经不存在的 `Abstract Inc`。
+     */
   }
 }

@@ -17,10 +17,10 @@ import {
   AUTO_DECIDE_STAGE, SPRINT_STAGE, DIL_MIN, DIL_AT, SAVOR_RATE,
   SAVOR_MONTHS_PER_MIN, SAVOR_END_MONTH, SAVOR_MKT_LINES, SAVOR_US_LINES,
   CYCLE_MONTHS, CYCLE_RISE, CYCLE_CRASH,
-  eventsFor, eventById, companyName,
+  eventsFor, eventById, companyName, RENAME_LINES,
 } from './content.js';
 import { rates, derived, purchase, lowestLine, costFor, spendableOf } from './economy.js';
-import { financeTick, isListed } from './finance.js';
+import { financeTick } from './finance.js';
 import { ordersTick } from './orders.js';
 import { worldTick, ranking, cycleNotes } from './world.js';
 import { calMonthOf, gameYear, gameMonths, fmt } from './format.js';
@@ -274,6 +274,17 @@ function advanceStage(s, D) {
    *    先摘掉这个年份前缀再认标签，否则推幕行会掉回兜底色（`.li.act` 丢色）。
    */
   s.log.push(`${a.years.slice(0, 4)}年【${a.place}】${a.open}`);
+  /**
+   * **更名**（用户 2026-09-28：「更名要有日志叙事」）—— 名字按**章**查表
+   * （`content.NAME_TIERS`，五段阶梯 2+2+2+1+1），所以改名点天然就是**换幕**：
+   * 相邻两章同名（1↔2、3↔4、5↔6）时一个字都不推，一局恰好四次
+   * （第 3 / 5 / 7 / 8 章各一次）。
+   * ⚠️ 紧跟在推幕行之后：那一行说「到了哪一幕」，这一行说「公司现在叫什么」——
+   *    两句挨着读才连得上。
+   * ⚠️ 文案来自 `RENAME_LINES`，**只写新名字**（旧版两个名字都写，2026-09-27 因超宽被收短过）。
+   */
+  const next = companyName(s.stage);
+  if (next !== companyName(s.stage - 1)) s.log.push(RENAME_LINES[next]);
   return true;
 }
 
@@ -510,7 +521,12 @@ export function tick(s, dtReal = 0.1, live = false) {
     s.topMonth = gameMonths(s);
     // ⚠️ 不再接「上面没有人了。」—— 同一局的名次播报（`【世界第 1】`）已经说了这一句，
     //    两条紧挨着出现是同一件事说两遍（用户 2026-09-27「事件描述避免重复」）。
-    s.log.push(`【登顶】${companyName(isListed(s))} 成了世界第一。`);
+    /**
+     * ⚠️ 公司名按**章**取（`companyName(s.stage)`，2026-09-28）—— 登顶必在第 8 章，
+     *    所以这里写的恒定是 `AbstrO`。**上一步 `advanceStage`（更名）必须排在这一步之前**：
+     *    同一次 tick 里若先判登顶再推幕，这一行会写出上一章的名字。顺序不能调。
+     */
+    s.log.push(`【登顶】${companyName(s.stage)} 成了世界第一。`);
   }
 
   if (s.log.length > LOG_MAX) s.log.splice(0, s.log.length - LOG_MAX);

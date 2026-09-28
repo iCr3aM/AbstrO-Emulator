@@ -258,10 +258,53 @@ export const SAVOR_US_LINES = {
 export const OPENING = '泡面凉了，报名表还在改。';
 
 /**
- * 公司名随进程演化：**敲钟之后**改名（判据是「已上市」，不是「第几章」——
- * 上市发生在第 7 章中段，按章节判断会在同一章里出现两个名字）。
+ * 公司名的**五段阶梯**（用户 2026-09-28：「公司更名改为阶段：Abstract Studio、
+ * Abstract Labs、Abstract Tech、Abstra、AbstrO」）。
+ *
+ * 规则是 **2 + 2 + 2 + 1 + 1**：同气质的两章共用一个名字，最后两章各走一步 ——
+ *   Studio（工作室）→ Labs（实验室）→ Tech（科技公司）→ Abstra（缩写）→ AbstrO（品牌 mark）
+ * 出租屋 + 车库都是小作坊；写字楼 + 资本局都是「团队成型、开始融资」；
+ * 海外分部 + 全球总部是「正规科技公司 + 合规审计」；交易所与天空塔各一步，
+ * 正好把「后缀越来越公司化 → 品牌越来越抽象」交代完。
+ *
+ * ⚠️ **下标是章**（`s.stage`），不是「已上市」—— 这个函数以前收一个布尔，
+ *    只在 IPO 敲钟那一下改名（`Abstract Inc`）。改成按章查表之后：
+ *    · 名字是**纯派生量**（不进存档、不升 `SAVE_VERSION`）；
+ *    · IPO 那一下**不再改名**（第 7 章一进来就已经叫 `Abstra`）⇒ `finance.js` 里那条
+ *      `【改名】` 已删，改名统一由 `engine.advanceStage` 在**换幕**那一刻推（见 `RENAME_LINES`）。
+ * ⚠️ `[0]` 是占位（章从 1 起）。`|| NAME_TIERS[1]` 兜底：读档时章次被夹到越界也不至于渲染出
+ *    `undefined`（`state.deserialize` 会夹，但这里不指望它）。
  */
-export const companyName = listed => (listed ? 'Abstract Inc' : 'Abstract Studio');
+export const NAME_TIERS = [
+  null,                  // 0：占位
+  'Abstract Studio',     // 1 出租屋
+  'Abstract Studio',     // 2 车库
+  'Abstract Labs',       // 3 写字楼
+  'Abstract Labs',       // 4 资本局
+  'Abstract Tech',       // 5 海外分部
+  'Abstract Tech',       // 6 全球总部
+  'Abstra',              // 7 交易所
+  'AbstrO',              // 8 天空塔
+];
+export const companyName = stage => NAME_TIERS[stage] || NAME_TIERS[1];
+
+/**
+ * 更名日志（用户 2026-09-28：「更名要有日志叙事」）—— **键是新名字**。
+ * `engine.advanceStage` 在换幕那一刻推一条（相邻两章同名时不推，所以一局恰好四次）。
+ *
+ * ⚠️ **只写新名字、不写旧名字**：旧版 `【改名】X 改名 Y。` 两个名字都写，
+ *    2026-09-27 就因为它太长被收短过（GDD §4.7）—— 沿用「只留新名字」的口径。
+ * ⚠️ **每条 ≤ 46 单位**（半角 1 / 全角 2）—— 与推幕行、周期播报、里程碑同一把尺子：
+ *    `probe` 的「一局全量日志」会逐条量、`shots` 用真 Chromium 量像素。实测 40 / 38 / 33 / 35。
+ * ⚠️ 四条**互不相同**（用户 2026-09-27：「一局内同一事件描述最多出现一次」）——
+ *    所以每句都对着那一幕的处境写（新前台 / 海外分公司 / 上市前 / 顶层那面墙），不套模板。
+ */
+export const RENAME_LINES = {
+  'Abstract Labs': '【改名】前台换了新招牌：Abstract Labs。',
+  'Abstract Tech': '【改名】海外分公司挂上 Abstract Tech。',
+  'Abstra': '【改名】上市前，招牌缩成 Abstra。',
+  'AbstrO': '【改名】顶层那面墙只留一个 AbstrO。',
+};
 
 // ─────────────────────────── 八章（GDD §2）───────────────────────────
 /**
