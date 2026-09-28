@@ -173,11 +173,15 @@ for (const vp of VIEWPORTS) {
     };
 
     /**
-     * HUD 四格**必须等高、且不随文字变化**（用户 2026-09-27：「现金那一格会随文字变化跳动
+     * HUD **同一行两格等高、且不随文字变化**（用户 2026-09-27：「现金那一格会随文字变化跳动
      * 格子高度……我要确保所有的框都是固定的」）。
      * 光量「当前高度」抓不住这个 bug（两帧都是短数字，看不出来），所以量两次：
-     *   ① 当前高度 —— 四格必须**全等**。现金格有 4 行（可动用 / 储备 各一行），其余三格 3 行，
-     *      靠 `.hud .cell` 的固定高度对齐；没有它，同一 grid 行被最高的那格撑开。
+     *   ① 当前高度 —— **上行两格（现金 / 市值）必须相等，下行两格（净利率＋世界 / 目标）必须相等**。
+     *      上行 4 行（可动用 / 储备、年营收 / 相比上月）、下行 3 行 ⇒ 行高约 `90px` / `74px`
+     *      （2026-09-28 前是四格一律 `90px`，用户「第三个和第四个 UI 框可以把高度缩小了，
+     *      因为现在没有第四行了」之后改成上行 4 行预算、下行 3 行预算）。
+     *      ⚠️ **不断言上下行相等**：那正是本次要取消的东西。跨行相等也不再是需求 ——
+     *      锁的是「同一 grid 行里不许被最高的那格撑开、且不许随字数变」。
      *   ② 把每个数值行 / 副行换成**最长的现实文本**（`¥2500.00万亿`）后再量 —— 高度必须一模一样。
      *      这条才是真断言：格子一旦跟着字数长高，这里立刻红。
      * ⚠️ 只塞 `b` / `u`，不碰 `i`：标签行没有 `nowrap`，塞超长串会自己折行，那是假阳性。
@@ -192,8 +196,11 @@ for (const vp of VIEWPORTS) {
     });
     if (hudCells.before.length !== 4) {
       console.log(`  ❌ HUD 格数不是 4（量到 ${hudCells.before.length}）`); fails++;
-    } else if (new Set(hudCells.before).size !== 1) {
-      console.log(`  ❌ HUD 四格高度不一致：${hudCells.before.join(' / ')}`); fails++;
+    } else {
+      const [r1a, r1b, r2a, r2b] = hudCells.before;
+      if (r1a !== r1b) { console.log(`  ❌ HUD 上行两格不等高：现金 ${r1a} / 市值 ${r1b}`); fails++; }
+      if (r2a !== r2b) { console.log(`  ❌ HUD 下行两格不等高：世界 ${r2a} / 目标 ${r2b}`); fails++; }
+      if (!(r2a < r1a)) { console.log(`  ❌ HUD 下行没有比上行矮（${r2a} ≥ ${r1a}）—— 3 行预算没生效`); fails++; }
     }
     if (hudCells.before.join() !== hudCells.after.join()) {
       console.log(`  ❌ HUD 高度随文字变长而变：${hudCells.before.join('/')} → ${hudCells.after.join('/')}`); fails++;
