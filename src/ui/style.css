@@ -64,7 +64,13 @@ html, body {
   border-bottom: 1px solid var(--line);
   background: rgba(13, 15, 18, .94);
 }
-.head .brand { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.head .brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* 公司 mark（`content.LOGO_PATH` 的矢量描摹，22px 见方）——`currentColor` ⇒ 跟着 `--accent` 走。
+   `flex: none`：工具区是 `flex: none` 的，mark 要是被压扁，形状就毁了。
+   ⚠️ 加它之前页头左块只有一行公司名，加完之后仍是一行：mark 是**行内**的一块，不新增高度档位
+   （`.head .brand .bnm` 的两行 16/11px 本来就比 22px 高，所以 `.head` 的 padding 与高度都不动）。 */
+.head .brand .mark { width: 22px; height: 22px; flex: none; display: block; color: var(--accent); }
+.head .brand .bnm { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .head .brand b {
   font-size: 16px;
   font-weight: 600;

@@ -10,7 +10,7 @@
 
 import {
   ACTS, LINES, lineName, FOUNDERS, agesAt, PENDING_CAP, SEC_PER_YEAR, companyName, MILESTONES,
-  IPO_LINE, SAVOR_RATE,
+  IPO_LINE, SAVOR_RATE, LOGO_PATH,
 } from '../core/content.js';
 import { rates, derived, manualCostOf, canAffordManual, sharePctOf } from '../core/economy.js';
 import { ORDER_SLOTS, liveOf, liveCount, hasHot, isHot, monthsLeftOf, valueOf, describeOrder, doneCount } from '../core/orders.js';
@@ -657,9 +657,12 @@ export function render(root, s) {
     : rankBlock(s, D);
 
   /**
-   * 页头 = **一行**（用户 2026-09-27）：左边是公司名 + 副行（日期 · 章节地标），右边只留工具区。
+   * 页头 = **一行**（用户 2026-09-27）：左边是公司 mark + 公司名 + 副行（日期 · 章节地标），右边只留工具区。
    * 两处让位：① 日期从公司名**右侧**挪到**下方**；② 「退休」按钮从页头**挪走**。
-   * 左边只剩公司名，工具区就永远放得下，`.head` 得以 `flex-wrap: nowrap`。
+   * 页头里只剩 mark + 公司名，工具区就永远放得下，`.head` 得以 `flex-wrap: nowrap`。
+   * ⚠️ mark = `content.LOGO_PATH`（公司原 LOGO 的矢量描摹），`22px` 见方，
+   *    颜色由 CSS 的 `currentColor` 接管 ⇒ 跟着八章主色走。它是 `aria-hidden`：
+   *    旁边那行公司名才是可读的名字，图形只是同一件事的视觉形态（读屏不必念两遍）。
    *
    * ⚠️ 「退休」按钮**只在登顶之后出现**（用户 2026-09-27 明确两次）：它是旧版那条
    *    「已登顶 · 时间冻结」横条的**替身** —— 同一个位置（HUD 正上方）、同一个条件（`s.ending`），
@@ -668,8 +671,11 @@ export function render(root, s) {
   root.innerHTML = `
   <header class="head">
     <div class="brand">
-      <b>${esc(companyName(s.stage))}</b>
-      <span>${gameDate(s)} · ${esc(a.place)}</span>
+      <svg class="mark" viewBox="0 0 100 100" aria-hidden="true"><path d="${LOGO_PATH}" fill="currentColor" fill-rule="evenodd"/></svg>
+      <div class="bnm">
+        <b>${esc(companyName(s.stage))}</b>
+        <span>${gameDate(s)} · ${esc(a.place)}</span>
+      </div>
     </div>
     <div class="tools">
       ${showSpeeds ? SPEEDS.map(v => `<button class="ic${s.speed === v ? ' on' : ''}" data-speed="${v}"${endDis}>${v}×</button>`).join('') : ''}
